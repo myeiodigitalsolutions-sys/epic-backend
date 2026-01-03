@@ -1,0 +1,59 @@
+const mongoose = require('mongoose');
+
+const studentSchema = new mongoose.Schema({
+  studentId: {
+    type: String,
+    required: [true, 'Student ID is required'],
+    unique: true
+  },
+  name: {
+    type: String,
+    required: [true, 'Student name is required'],
+    trim: true
+  },
+  email: {
+    type: String,
+    required: [true, 'Email is required'],
+    unique: true,
+    lowercase: true,
+    trim: true,
+    match: [/^\S+@\S+\.\S+$/, 'Please enter a valid email']
+  },
+  password: {
+    type: String,
+    required: false
+  },
+  program: {
+    type: String,
+    default: '',
+    trim: true
+  },
+  phone: {
+    type: String,
+    default: '',
+    trim: true
+  },
+  enrollmentDate: {
+    type: Date,
+    default: Date.now
+  },
+  createdAt: {
+    type: Date,
+    default: Date.now
+  },
+  updatedAt: {
+    type: Date,
+    default: Date.now
+  }
+});
+
+// Update the updatedAt field on save
+studentSchema.pre('save', function(next) {
+  this.updatedAt = Date.now();
+  next();
+});
+
+// Create index for email for faster lookups
+studentSchema.index({ email: 1 });
+
+module.exports = mongoose.model('Student', studentSchema);
