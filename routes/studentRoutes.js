@@ -2,7 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const router = express.Router();
 const admin = require('firebase-admin');
-const Student = require('../models/Students');
+const Student = require('../models/StudentV2');
 const Staff = require('../models/Staff');
 
 // GET all students

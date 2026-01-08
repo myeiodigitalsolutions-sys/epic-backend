@@ -1,14 +1,14 @@
 const mongoose = require('mongoose');
 
-const staffSchema = new mongoose.Schema({
-  staffId: {
+const studentSchema = new mongoose.Schema({
+  studentId: {
     type: String,
-    required: [true, 'Staff ID is required'],
+    required: [true, 'Student ID is required'],
     unique: true
   },
   name: {
     type: String,
-    required: [true, 'Staff name is required'],
+    required: [true, 'Student name is required'],
     trim: true
   },
   email: {
@@ -21,7 +21,21 @@ const staffSchema = new mongoose.Schema({
   },
   password: {
     type: String,
-    required: false 
+    required: false
+  },
+  program: {
+    type: String,
+    default: '',
+    trim: true
+  },
+  phone: {
+    type: String,
+    default: '',
+    trim: true
+  },
+  enrollmentDate: {
+    type: Date,
+    default: Date.now
   },
   createdAt: {
     type: Date,
@@ -34,12 +48,12 @@ const staffSchema = new mongoose.Schema({
 });
 
 // Update the updatedAt field on save
-staffSchema.pre('save', function(next) {
+studentSchema.pre('save', function(next) {
   this.updatedAt = Date.now();
   next();
 });
 
 // Create index for email for faster lookups
-staffSchema.index({ email: 1 });
+studentSchema.index({ email: 1 });
 
-module.exports = mongoose.model('Staff', staffSchema);
+module.exports = mongoose.model('Student', studentSchema);

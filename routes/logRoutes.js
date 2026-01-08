@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const Class = require('../models/Class');
 const Staff = require('../models/Staff');
-const Student = require('../models/Students');
+const Student = require('../models/StudentV2');
 
 // Get logs for PDF export
 router.get('/export-data', async (req, res) => {

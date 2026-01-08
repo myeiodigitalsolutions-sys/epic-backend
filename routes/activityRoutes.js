@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Activity = require('../models/StudentActivity');
 const Class = require('../models/Class');
-const Student = require('../models/Students');
+const Student = require('../models/StudentV2');
 
 // Helper function to extract name from email
 function extractNameFromEmail(email) {

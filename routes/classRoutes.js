@@ -3,14 +3,21 @@ const mongoose = require('mongoose');
 const router = express.Router();
 const Class = require('../models/Class');
 const Staff = require('../models/Staff');
-const Student = require('../models/Students');
+const Student = require('../models/StudentV2');
 
+function extractNameFromEmail(email) {
+  if (!email) return 'Unknown User';
+  const username = email.split('@')[0];
+  const cleanName = username.replace(/[0-9._-]+/g, ' ');
+  return cleanName.split(' ')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ')
+    .trim() || 'Unknown User';
+}
 
-
-// Create a new class
 router.post('/', async (req, res) => {
   try {
-    const { name, section, subject, teacher, staffId, email, position, department, phone } = req.body;
+    const { name, section, subject, teacher, staffId, email } = req.body;
 
     if (!name || !staffId || !email) {
       return res.status(400).json({ 
@@ -30,9 +37,6 @@ router.post('/', async (req, res) => {
         staffId,
         name: teacher || email.split('@')[0] || 'Unknown',
         email,
-        position: position || '',
-        department: department || '',
-        phone: phone || '',
         joinedAt: new Date()
       }],
       students: []
@@ -53,7 +57,6 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Get all classes or classes for a specific staff member
 router.get('/', async (req, res) => {
   try {
     const { staffId } = req.query;
@@ -80,12 +83,9 @@ router.get('/', async (req, res) => {
   }
 });
 
-
-
-// Join a class
 router.post('/join', async (req, res) => {
   try {
-    const { classCode, studentId, name, email, rollNumber, batch, major } = req.body;
+    const { classCode, studentId, name, email } = req.body;
     if (!classCode || !studentId || !email) {
       return res.status(400).json({ 
         success: false,
@@ -115,9 +115,6 @@ router.post('/join', async (req, res) => {
       studentId,
       name: name || email.split('@')[0] || 'Unknown',
       email,
-      rollNumber: rollNumber || '',
-      batch: batch || '',
-      major: major || '',
       joinedAt: new Date()
     });
 
@@ -137,7 +134,6 @@ router.post('/join', async (req, res) => {
   }
 });
 
-// Verify class for sharing
 router.get('/:id/verify', async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -169,7 +165,6 @@ router.get('/:id/verify', async (req, res) => {
   }
 });
 
-// Get class details for a specific staff member
 router.get('/:classId/staff/:staffId', async (req, res) => {
   try {
     const { classId, staffId } = req.params;
@@ -189,7 +184,6 @@ router.get('/:classId/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Verify if the staffId is part of the class
     const isAuthorized = classData.staffId === staffId || classData.staff.some(s => s.staffId === staffId);
     if (!isAuthorized) {
       return res.status(403).json({ 
@@ -211,20 +205,6 @@ router.get('/:classId/staff/:staffId', async (req, res) => {
   }
 });
 
-// // Add this helper function at the top of the file
-function extractNameFromEmail(email) {
-  if (!email) return 'Unknown User';
-  const username = email.split('@')[0];
-  // Remove numbers and special characters, then split by dots/underscores
-  const cleanName = username.replace(/[0-9._-]+/g, ' ');
-  // Capitalize first letter of each word
-  return cleanName.split(' ')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ')
-    .trim() || 'Unknown User';
-}
-
-// Update the people route to use email-derived names when database names aren't available
 router.get('/:classId/people/staff/:staffId', async (req, res) => {
   try {
     const { classId, staffId } = req.params;
@@ -244,7 +224,6 @@ router.get('/:classId/people/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Verify if the staffId is part of the class
     const isAuthorized = classData.staffId === staffId || classData.staff.some(s => s.staffId === staffId);
     if (!isAuthorized) {
       return res.status(403).json({ 
@@ -253,16 +232,12 @@ router.get('/:classId/people/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Combine staff and students into a single people array with names derived from email if needed
     const people = [
       ...(classData.staff || []).map(s => ({
         id: s.staffId,
         name: s.name || extractNameFromEmail(s.email),
         email: s.email || 'N/A',
         role: 'staff',
-        position: s.position || '',
-        department: s.department || '',
-        phone: s.phone || '',
         pinned: false
       })),
       ...(classData.students || []).map(s => ({
@@ -270,9 +245,6 @@ router.get('/:classId/people/staff/:staffId', async (req, res) => {
         name: s.name || extractNameFromEmail(s.email),
         email: s.email || 'N/A',
         role: 'student',
-        rollNumber: s.rollNumber || '',
-        batch: s.batch || '',
-        major: s.major || '',
         pinned: false
       }))
     ];
@@ -290,8 +262,6 @@ router.get('/:classId/people/staff/:staffId', async (req, res) => {
     });
   }
 });
-
-// Invite a person to a class
 
 router.post('/:classId/invite/staff/:staffId', async (req, res) => {
   try {
@@ -314,7 +284,6 @@ router.post('/:classId/invite/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Find the class
     const classData = await Class.findById(classId);
     if (!classData) {
       return res.status(404).json({ 
@@ -323,7 +292,6 @@ router.post('/:classId/invite/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Check if the inviting staff has permission
     const isAuthorized = classData.staffId === staffId || classData.staff.some(s => s.staffId === staffId);
     if (!isAuthorized) {
       return res.status(403).json({ 
@@ -332,8 +300,6 @@ router.post('/:classId/invite/staff/:staffId', async (req, res) => {
       });
     }
 
-    // IMPORTANT: Find staff by email in the Staff database
-    // Make sure you have the Staff model imported at the top
     const staffToAdd = await Staff.findOne({ email: email.toLowerCase() });
     if (!staffToAdd) {
       return res.status(404).json({ 
@@ -342,7 +308,6 @@ router.post('/:classId/invite/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Check if staff already exists in the class
     const alreadyExists = classData.staff.some(s => s.staffId === staffToAdd.staffId || s.email === email.toLowerCase());
     if (alreadyExists) {
       return res.status(400).json({ 
@@ -351,30 +316,22 @@ router.post('/:classId/invite/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Add staff to class with their actual details from Staff database
     classData.staff.push({
-      staffId: staffToAdd.staffId, // Use the staffId from Staff database
+      staffId: staffToAdd.staffId,
       name: staffToAdd.name || email.split('@')[0],
       email: email.toLowerCase(),
-      position: staffToAdd.position || 'Teacher',
-      department: staffToAdd.department || '',
-      phone: staffToAdd.phone || '',
       joinedAt: new Date()
     });
 
     await classData.save();
 
-    // Return success response
     res.json({ 
       success: true,
       person: {
         id: staffToAdd.staffId,
         name: staffToAdd.name || email.split('@')[0],
         email: email.toLowerCase(),
-        role: 'staff',
-        position: staffToAdd.position || 'Teacher',
-        department: staffToAdd.department || '',
-        phone: staffToAdd.phone || ''
+        role: 'staff'
       },
       message: `Staff member ${staffToAdd.name} added successfully to class`
     });
@@ -388,7 +345,6 @@ router.post('/:classId/invite/staff/:staffId', async (req, res) => {
   }
 });
 
-// Remove a person from a class
 router.delete('/:classId/people/:personId/staff/:staffId', async (req, res) => {
   try {
     const { classId, personId, staffId } = req.params;
@@ -408,7 +364,6 @@ router.delete('/:classId/people/:personId/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Verify if the staffId is part of the class
     const isAuthorized = classData.staffId === staffId || classData.staff.some(s => s.staffId === staffId);
     if (!isAuthorized) {
       return res.status(403).json({ 
@@ -417,7 +372,6 @@ router.delete('/:classId/people/:personId/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Check if person exists in staff or students
     const staffIndex = classData.staff.findIndex(s => s.staffId === personId);
     const studentIndex = classData.students.findIndex(s => s.studentId === personId);
 
@@ -449,7 +403,6 @@ router.delete('/:classId/people/:personId/staff/:staffId', async (req, res) => {
   }
 });
 
-// Update a class
 router.put('/:id', async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -485,7 +438,6 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// Delete a class
 router.delete('/:id', async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
@@ -516,7 +468,6 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// Add this route for enrollment verification
 router.get('/:classId/students/:studentId', async (req, res) => {
   try {
     const { classId, studentId } = req.params;
@@ -546,7 +497,6 @@ router.get('/:classId/people/student/:studentId', async (req, res) => {
     const { classId, studentId } = req.params;
     const { email } = req.query;
 
-    // Validate inputs
     if (!email || email === 'undefined') {
       return res.status(400).json({ 
         success: false,
@@ -554,7 +504,6 @@ router.get('/:classId/people/student/:studentId', async (req, res) => {
       });
     }
 
-    // Find class and validate
     const classData = await Class.findById(classId);
     if (!classData) {
       return res.status(404).json({ 
@@ -563,7 +512,6 @@ router.get('/:classId/people/student/:studentId', async (req, res) => {
       });
     }
 
-    // Verify student enrollment (more flexible check)
     const isEnrolled = classData.students.some(student => 
       (student.studentId === studentId || student.email === email)
     );
@@ -575,7 +523,6 @@ router.get('/:classId/people/student/:studentId', async (req, res) => {
       });
     }
 
-    // Prepare response data
     const response = {
       success: true,
       people: [
@@ -606,13 +553,11 @@ router.get('/:classId/people/student/:studentId', async (req, res) => {
   }
 });
 
-// New POST route to add a student to a classroom
 router.post('/:classId/people/staff/:staffId', async (req, res) => {
   try {
     const { classId, staffId } = req.params;
     const { studentEmail } = req.body;
 
-    // Validate input
     if (!studentEmail) {
       return res.status(400).json({ 
         success: false,
@@ -620,7 +565,6 @@ router.post('/:classId/people/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Check if the classroom exists
     const classData = await Class.findById(classId);
     if (!classData) {
       return res.status(404).json({ 
@@ -629,99 +573,6 @@ router.post('/:classId/people/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Verify if the staffId is part of the class
-      const isAuthorized = classData.staffId === staffId || classData.staff.some(s => s.staffId === staffId);
-    if (!isAuthorized) {
-      return res.status(403).json({ 
-        success: false,
-        error: 'Unauthorized: Staff member does not have access to this class' 
-      });
-    }
-
-    // Find the student by email
-    const student = await Student.findOne({ email: studentEmail });
-    if (!student) {
-      return res.status(404).json({ 
-        success: false,
-        error: 'Student not found with the provided email' 
-      });
-    }
-
-    // Check if the student is already in the classroom
-    const alreadyJoined = classData.students.some(s => s.studentId === student._id.toString());
-    if (alreadyJoined) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'Student is already in the classroom' 
-      });
-    }
-
-    // Add the student to the classroom
-    classData.students.push({
-      studentId: student._id.toString(),
-      name: student.name || studentEmail.split('@')[0] || 'Unknown',
-      email: studentEmail,
-      rollNumber: student.rollNumber || '',
-      batch: student.batch || '',
-      major: student.major || '',
-      joinedAt: new Date()
-    });
-    await classData.save();
-
-    res.status(200).json({ 
-      success: true,
-      message: `Student ${student.email} successfully added to class ${classId}`,
-      data: { studentId: student._id, classroomId: classId }
-    });
-  } catch (err) {
-    console.error('Error adding student to classroom:', err);
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to add student: ' + err.message 
-    });
-  }
-});
-
-
-// Existing GET route to fetch all students
-router.get('/', async (req, res) => {
-  try {
-    const students = await Student.find({});
-    res.json(students);
-  } catch (err) {
-    console.error('Error fetching students:', err);
-    res.status(500).json({ 
-      success: false,
-      error: 'Failed to fetch students: ' + err.message 
-    });
-  }
-});
-
-
-
-router.post('/:classId/people/staff/:staffId', async (req, res) => {
-  try {
-    const { classId, staffId } = req.params;
-    const { studentEmail } = req.body;
-
-    // Validate input
-    if (!studentEmail) {
-      return res.status(400).json({ 
-        success: false,
-        error: 'Student email is required' 
-      });
-    }
-
-    // Check if the classroom exists
-    const classData = await Class.findById(classId);
-    if (!classData) {
-      return res.status(404).json({ 
-        success: false,
-        error: 'Class not found' 
-      });
-    }
-
-    // Verify if the staffId is part of the class
     const isAuthorized = classData.staffId === staffId || classData.staff.some(s => s.staffId === staffId);
     if (!isAuthorized) {
       return res.status(403).json({ 
@@ -730,7 +581,6 @@ router.post('/:classId/people/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Find the student by email
     const student = await Student.findOne({ email: studentEmail });
     if (!student) {
       return res.status(404).json({ 
@@ -739,7 +589,6 @@ router.post('/:classId/people/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Check if the student is already in the classroom
     const alreadyJoined = classData.students.some(s => s.studentId === student._id.toString());
     if (alreadyJoined) {
       return res.status(400).json({ 
@@ -748,14 +597,10 @@ router.post('/:classId/people/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Add the student to the classroom
     classData.students.push({
       studentId: student._id.toString(),
       name: student.name || studentEmail.split('@')[0] || 'Unknown',
       email: studentEmail,
-      rollNumber: student.rollNumber || '',
-      batch: student.batch || '',
-      major: student.major || '',
       joinedAt: new Date()
     });
     await classData.save();
@@ -788,7 +633,6 @@ router.get('/student/:studentId', async (req, res) => {
       });
     }
 
-    // Find classes where the student's email is in the students array
     const studentClasses = await Class.find({
       'students.email': email
     }).sort({ createdAt: -1 });
@@ -807,14 +651,11 @@ router.get('/student/:studentId', async (req, res) => {
   }
 });
 
-
-// Bulk add students to a class
 router.post('/:classId/people/bulk/staff/:staffId', async (req, res) => {
   try {
     const { classId, staffId } = req.params;
     const { studentEmails } = req.body;
 
-    // Validate input
     if (!studentEmails || !Array.isArray(studentEmails)) {
       return res.status(400).json({ 
         success: false,
@@ -822,10 +663,8 @@ router.post('/:classId/people/bulk/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Remove duplicates from studentEmails array
     const uniqueEmails = [...new Set(studentEmails.map(email => email?.toLowerCase()))].filter(email => email);
 
-    // Check if the classroom exists
     const classData = await Class.findById(classId);
     if (!classData) {
       return res.status(404).json({ 
@@ -834,7 +673,6 @@ router.post('/:classId/people/bulk/staff/:staffId', async (req, res) => {
       });
     }
 
-    // Verify if the staffId is part of the class
     const isAuthorized = classData.staffId === staffId || classData.staff.some(s => s.staffId === staffId);
     if (!isAuthorized) {
       return res.status(403).json({ 
@@ -846,23 +684,19 @@ router.post('/:classId/people/bulk/staff/:staffId', async (req, res) => {
     const addedStudents = [];
     const skippedEmails = [];
 
-    // Process each unique email
     for (const email of uniqueEmails) {
       try {
-        // Validate email format
         if (!email || !email.endsWith('@gmail.com')) {
           skippedEmails.push(email);
           continue;
         }
 
-        // Find the student by email
         const student = await Student.findOne({ email });
         if (!student) {
           skippedEmails.push(email);
           continue;
         }
 
-        // Check if the student is already in the classroom by studentId or email
         const alreadyJoined = classData.students.some(s => 
           s.studentId === student._id.toString() || s.email.toLowerCase() === email.toLowerCase()
         );
@@ -871,14 +705,10 @@ router.post('/:classId/people/bulk/staff/:staffId', async (req, res) => {
           continue;
         }
 
-        // Add the student to the classroom
         classData.students.push({
           studentId: student._id.toString(),
           name: student.name || email.split('@')[0] || 'Unknown',
           email,
-          rollNumber: student.rollNumber || '',
-          batch: student.batch || '',
-          major: student.major || '',
           joinedAt: new Date()
         });
 
@@ -893,7 +723,6 @@ router.post('/:classId/people/bulk/staff/:staffId', async (req, res) => {
       }
     }
 
-    // Save the updated class data
     await classData.save();
 
     res.status(200).json({ 
@@ -910,6 +739,5 @@ router.post('/:classId/people/bulk/staff/:staffId', async (req, res) => {
     });
   }
 });
-
 
 module.exports = router;
