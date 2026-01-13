@@ -6,7 +6,7 @@ const admin = require('firebase-admin');
 
 // Models
 const Staff = require('../models/Staff');
-const Student = require('../models/StudentV2');
+const Student = require('../models/Students');
 
 // Common email regex
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;

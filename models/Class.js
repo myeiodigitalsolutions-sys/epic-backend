@@ -47,6 +47,18 @@ const classSchema = new mongoose.Schema({
       type: String,
       default: ''
     },
+    rollNumber: {
+      type: String,
+      default: ''
+    },
+    batch: {
+      type: String,
+      default: ''
+    },
+    major: {
+      type: String,
+      default: ''
+    },
     joinedAt: { 
       type: Date, 
       default: Date.now 
@@ -62,6 +74,18 @@ const classSchema = new mongoose.Schema({
       default: 'Unknown'
     },
     email: {
+      type: String,
+      default: ''
+    },
+    position: {
+      type: String,
+      default: ''
+    },
+    department: {
+      type: String,
+      default: ''
+    },
+    phone: {
       type: String,
       default: ''
     },

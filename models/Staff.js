@@ -21,7 +21,22 @@ const staffSchema = new mongoose.Schema({
   },
   password: {
     type: String,
-    required: false 
+    required: false // Store for export, but not for authentication
+  },
+  position: {
+    type: String,
+    default: 'Teacher',
+    trim: true
+  },
+  department: {
+    type: String,
+    default: '',
+    trim: true
+  },
+  phone: {
+    type: String,
+    default: '',
+    trim: true
   },
   createdAt: {
     type: Date,
