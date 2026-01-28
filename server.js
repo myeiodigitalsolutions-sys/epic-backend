@@ -1,16 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
-const classRoutes = require('./routes/classRoutes');
-const announcementRoutes = require('./routes/announcementRoutes');
-const unitRoutes = require('./routes/unitRoutes');
-const assignmentRoutes = require('./routes/assignments');
-const submissionRoutes = require('./routes/submissions');
-const staffRoutes = require('./routes/staffRoutes');
-const studentRoutes = require('./routes/studentRoutes');
-const admin = require('firebase-admin');
-const messageRoutes = require('./routes/messages');
-const studLogin = require('./routes/activityRoutes');
 const fs = require('fs');
 const path = require('path');
 require('dotenv').config();
@@ -28,10 +18,13 @@ if (!firebaseConfig.projectId || !firebaseConfig.clientEmail || !firebaseConfig.
   process.exit(1);
 }
 
+const admin = require('firebase-admin');
 admin.initializeApp({
   credential: admin.credential.cert(firebaseConfig),
-  storageBucket: 'epic-4066e.firebasestorage.app'
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET || 'epic-4066e.firebasestorage.app'
 });
+
+console.log('Firebase Storage initialized successfully');
 
 const app = express();
 const port = process.env.PORT || 5000;
@@ -79,6 +72,16 @@ app.use('/logs', express.static(logsDir));
 
 app.use(express.static(publicDir));
 
+const classRoutes = require('./routes/classRoutes');
+const announcementRoutes = require('./routes/announcementRoutes');
+const unitRoutes = require('./routes/unitRoutes');
+const assignmentRoutes = require('./routes/assignments');
+const submissionRoutes = require('./routes/submissions');
+const staffRoutes = require('./routes/staffRoutes');
+const studentRoutes = require('./routes/studentRoutes');
+const messageRoutes = require('./routes/messages');
+const studLogin = require('./routes/activityRoutes');
+
 app.use('/api/classes', classRoutes);
 app.use('/api/announcements', announcementRoutes);
 app.use('/api/units', unitRoutes);
@@ -124,19 +127,6 @@ app.get('/test-logo', (req, res) => {
   }
 });
 
-app.get('/api/submissions/test/:id', async (req, res) => {
-  try {
-    const Submission = require('./models/Submission');
-    const submission = await Submission.findById(req.params.id);
-    if (!submission) {
-      return res.status(404).json({ message: 'Submission not found' });
-    }
-    res.json(submission);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
 app.use((req, res) => {
   res.status(404).json({
     message: `Route not found: ${req.method} ${req.path}`,
@@ -163,10 +153,6 @@ app.use((err, req, res, next) => {
 
 app.listen(port, () => {
   console.log(`Server running on port ${port}`);
-  console.log(`Public directory: ${publicDir}`);
-  console.log(`Check logo at: http://localhost:${port}/test-logo`);
   console.log(`Health check: http://localhost:${port}/health`);
   console.log(`API Health check: http://localhost:${port}/api/health`);
-  console.log(`Staff routes mounted at: /api/staff`);
-  console.log(`Student routes mounted at: /api/students`);
 });

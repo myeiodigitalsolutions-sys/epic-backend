@@ -261,7 +261,7 @@ router.delete('/users', async (req, res) => {
 // ===============================
 // UPDATE USER (staff or student) — PUT /api/staff/users
 // Combined old + new
-
+// ===============================
 router.put('/users', async (req, res) => {
   try {
     const {
@@ -281,7 +281,6 @@ router.put('/users', async (req, res) => {
       name,
       program,
       department,
-      newPassword: newPassword ? '***' : 'not provided',
     });
 
     if (!oldEmail || !type || !['staff', 'student'].includes(type)) {
@@ -344,49 +343,35 @@ router.put('/users', async (req, res) => {
       console.log('User updated in Firebase:', fbUser.uid);
     }
 
-    // Prepare Mongo update - FIXED: Include password update
+    // Prepare Mongo update
     const mongoUpdate = {};
     if (newEmail) mongoUpdate.email = newEmail.toLowerCase().trim();
     if (name) mongoUpdate.name = name.trim();
-    
-    // CRITICAL FIX: Update password in MongoDB when it's changed
-    if (newPassword) {
-      mongoUpdate.password = newPassword; // Store the new password in MongoDB
-      mongoUpdate.passwordUpdated = true;
-      mongoUpdate.lastPasswordUpdate = new Date();
-    }
-    
     if (type === 'staff' && department) mongoUpdate.department = department.trim();
     if (type === 'student' && program) mongoUpdate.program = program.trim();
-    
-    // Always update the updatedAt timestamp
-    mongoUpdate.updatedAt = new Date();
 
     if (Object.keys(mongoUpdate).length > 0) {
       const Model = type === 'staff' ? Staff : Student;
       await Model.updateOne({ email: lowerOld }, { $set: mongoUpdate });
-      console.log(`${type} updated in MongoDB with:`, Object.keys(mongoUpdate));
+      console.log(`${type} updated in MongoDB`);
     }
 
     res.status(200).json({
-      success: true, // Added success flag for frontend
       message: `User ${newEmail || oldEmail} updated successfully`,
-      updatedFields: Object.keys(mongoUpdate)
     });
   } catch (err) {
     console.error('Error updating user:', err);
     if (err.code === 'auth/email-already-exists') {
       return res.status(400).json({
-        success: false,
         error: 'New email is already in use',
       });
     }
     res.status(500).json({
-      success: false,
       error: 'Failed to update user: ' + err.message,
     });
   }
 });
+
 // ===============================
 // BULK UPLOAD — POST /api/staff/bulk-users?type=staff|student
 // Merged old + new (kept summary + optional cleanup)

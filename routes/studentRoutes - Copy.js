@@ -404,11 +404,10 @@ router.delete('/users', async (req, res) => {
 });
 
 // Update user (student) - Keep existing
-// Update user (student) - Keep existing
 router.put('/users', async (req, res) => {
   try {
     const { oldEmail, newEmail, type, newPassword, name, program } = req.body;
-    console.log('Update request received:', { oldEmail, newEmail, type, name, program, newPassword: newPassword ? '***' : 'not provided' });
+    console.log('Update request received:', { oldEmail, newEmail, type, name, program });
 
     if (!oldEmail || !type) {
       return res.status(400).json({ 
@@ -483,45 +482,31 @@ router.put('/users', async (req, res) => {
       console.log('User updated in Firebase:', user.uid);
     }
 
-    // Update MongoDB - FIXED: Include password update
+    // Update MongoDB
     const mongoUpdateData = {};
     if (newEmail) mongoUpdateData.email = newEmail.toLowerCase().trim();
     if (name) mongoUpdateData.name = name.trim();
     if (program) mongoUpdateData.program = program.trim();
-    
-    // CRITICAL FIX: Update password in MongoDB when it's changed
-    if (newPassword) {
-      mongoUpdateData.password = newPassword; // Store the new password in MongoDB
-      mongoUpdateData.passwordUpdated = true;
-      mongoUpdateData.lastPasswordUpdate = new Date();
-    }
-    
-    // Always update the updatedAt timestamp
-    mongoUpdateData.updatedAt = new Date();
     
     if (Object.keys(mongoUpdateData).length > 0) {
       await Student.updateOne(
         { email: lowerOldEmail },
         { $set: mongoUpdateData }
       );
-      console.log('Student updated in MongoDB with fields:', Object.keys(mongoUpdateData));
+      console.log('Student updated in MongoDB');
     }
 
     res.status(200).json({ 
-      success: true, // Added success flag for frontend
-      message: `User ${newEmail || oldEmail} updated successfully`,
-      updatedFields: Object.keys(mongoUpdateData)
+      message: `User ${newEmail || oldEmail} updated successfully` 
     });
   } catch (err) {
     console.error('Error updating user:', err);
     if (err.code === 'auth/email-already-exists') {
       return res.status(400).json({ 
-        success: false,
         error: 'New email is already in use' 
       });
     }
     res.status(500).json({ 
-      success: false,
       error: 'Failed to update user: ' + err.message 
     });
   }

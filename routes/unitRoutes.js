@@ -2,46 +2,35 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs'); 
-const fsPromises = require('fs').promises; 
 const Unit = require('../models/unit');
 const File = require('../models/files');
+const admin = require('firebase-admin');
 
-// Ensure uploads directory exists
-const uploadsDir = path.join(__dirname, '../Uploads');
-fsPromises.mkdir(uploadsDir, { recursive: true }).catch(console.error);
+let bucket;
+try {
+  bucket = admin.storage().bucket();
+} catch (err) {
+  console.error('Failed to get Firebase Storage bucket:', err.message);
+  bucket = null;
+}
 
-// Multer configuration for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, 'Uploads/');
-  },
-  filename: (req, file, cb) => {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, uniqueSuffix + '-' + file.originalname);
-  },
-});
-
+const storage = multer.memoryStorage();
 const upload = multer({
   storage: storage,
-  limits: { fileSize: 100 * 1024 * 1024 }, // Increased to 100MB for videos
+  limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedTypes = [
-      // Images
       'image/jpeg',
       'image/png',
       'image/gif',
       'image/webp',
-      // Videos
       'video/mp4',
       'video/mpeg',
       'video/webm',
       'video/ogg',
-      // Audio
       'audio/mpeg',
       'audio/wav',
       'audio/ogg',
-      // Documents
       'application/pdf',
       'application/vnd.ms-powerpoint',
       'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -55,7 +44,6 @@ const upload = multer({
       'text/css',
       'application/javascript',
       'text/markdown',
-      // Archives
       'application/zip',
     ];
     if (allowedTypes.includes(file.mimetype)) {
@@ -66,7 +54,6 @@ const upload = multer({
   },
 });
 
-// Utility function to format file size
 const formatFileSize = (bytes) => {
   if (bytes === 0) return '0 Bytes';
   const k = 1024;
@@ -75,7 +62,55 @@ const formatFileSize = (bytes) => {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 };
 
-// Get all units for a class
+const uploadToFirebase = async (file, fileName) => {
+  if (!bucket) {
+    throw new Error('Firebase Storage not available');
+  }
+
+  const timestamp = Date.now();
+  const extension = path.extname(file.originalname);
+  const uniqueName = `${timestamp}-${Math.random().toString(36).substring(7)}${extension}`;
+  const filePath = `units/${uniqueName}`;
+
+  const buffer = file.buffer;
+
+  const fileRef = bucket.file(filePath);
+
+  await fileRef.save(buffer, {
+    metadata: {
+      contentType: file.mimetype,
+      metadata: {
+        originalName: file.originalname,
+        uploadedAt: new Date().toISOString()
+      }
+    }
+  });
+
+  await fileRef.makePublic();
+
+  const publicUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+  
+  return {
+    url: publicUrl,
+    filePath: filePath,
+    name: file.originalname,
+    size: file.size,
+    type: file.mimetype
+  };
+};
+
+const deleteFromFirebase = async (filePath) => {
+  if (!bucket || !filePath) return;
+  
+  try {
+    const fileRef = bucket.file(filePath);
+    await fileRef.delete();
+    console.log(`File deleted from Firebase: ${filePath}`);
+  } catch (err) {
+    console.error('Error deleting file from Firebase:', err.message);
+  }
+};
+
 router.get('/:classId', async (req, res) => {
   try {
     const units = await Unit.find({ classId: req.params.classId }).populate('files');
@@ -86,7 +121,6 @@ router.get('/:classId', async (req, res) => {
   }
 });
 
-// Create new unit
 router.post('/', async (req, res) => {
   try {
     const { unitTitle, unitDescription, classId } = req.body;
@@ -100,10 +134,26 @@ router.post('/', async (req, res) => {
     const newUnit = new Unit({
       title: unitTitle,
       classId,
-      files: unitDescription
-        ? [(await new File({ title: 'Overview', name: 'overview.txt', type: 'text/plain', size: formatFileSize(Buffer.from(unitDescription).length), content: unitDescription, lastModified: new Date().toLocaleDateString(), isNotes: true, filePath: '' }).save())._id]
-        : [],
+      files: []
     });
+
+    if (unitDescription) {
+      const fileData = new File({
+        title: 'Overview',
+        name: 'overview.txt',
+        type: 'text/plain',
+        size: formatFileSize(Buffer.from(unitDescription).length),
+        content: unitDescription,
+        lastModified: new Date().toLocaleDateString(),
+        isUploadedFile: false,
+        isNotes: true,
+        isLink: false,
+        filePath: '',
+        url: ''
+      });
+      const savedFile = await fileData.save();
+      newUnit.files.push(savedFile._id);
+    }
 
     const savedUnit = await newUnit.save();
     const populatedUnit = await Unit.findById(savedUnit._id).populate('files');
@@ -114,10 +164,6 @@ router.post('/', async (req, res) => {
   }
 });
 
-// Add file to unit
-// ... (other imports and configurations remain the same)
-
-// Add file to unit
 router.post('/:unitId/files', upload.single('fileUpload'), async (req, res) => {
   try {
     const { unitId } = req.params;
@@ -133,15 +179,24 @@ router.post('/:unitId/files', upload.single('fileUpload'), async (req, res) => {
     }
 
     let fileData;
-    if (fileType === 'upload' && req.file) {
-      const isTextFile =
-        req.file.mimetype.startsWith('text/') ||
-        req.file.mimetype === 'application/json' ||
-        req.file.originalname.match(/\.(txt|js|html|css|md)$/);
+    let firebaseUrl = '';
 
-      const fileContent = isTextFile
-        ? await fsPromises.readFile(req.file.path, 'utf8').catch(() => null)
-        : null;
+    if (fileType === 'upload' && req.file) {
+      if (!bucket) {
+        return res.status(500).json({ error: 'Firebase Storage not available' });
+      }
+      
+      const uploadResult = await uploadToFirebase(req.file, fileName);
+      firebaseUrl = uploadResult.url;
+
+      const isTextFile = req.file.mimetype.startsWith('text/') ||
+                       req.file.mimetype === 'application/json' ||
+                       req.file.originalname.match(/\.(txt|js|html|css|md)$/);
+
+      let fileContent = null;
+      if (isTextFile && req.file.buffer) {
+        fileContent = req.file.buffer.toString('utf8');
+      }
 
       fileData = new File({
         title: fileName,
@@ -153,7 +208,8 @@ router.post('/:unitId/files', upload.single('fileUpload'), async (req, res) => {
         isUploadedFile: true,
         isNotes: false,
         isLink: false,
-        filePath: req.file.path,
+        filePath: uploadResult.filePath,
+        url: firebaseUrl
       });
     } else if (fileType === 'notes' && notesContent) {
       const blob = Buffer.from(notesContent);
@@ -168,6 +224,7 @@ router.post('/:unitId/files', upload.single('fileUpload'), async (req, res) => {
         isNotes: true,
         isLink: false,
         filePath: '',
+        url: ''
       });
     } else if (fileType === 'link' && linkUrl) {
       if (!linkUrl.match(/^https?:\/\/[^\s/$.?#].[^\s]*$/)) {
@@ -176,7 +233,7 @@ router.post('/:unitId/files', upload.single('fileUpload'), async (req, res) => {
       fileData = new File({
         title: fileName,
         name: fileName,
-        type: 'text/link', // Custom MIME type for links
+        type: 'text/link',
         size: formatFileSize(Buffer.from(linkUrl).length),
         content: linkUrl,
         lastModified: new Date().toLocaleDateString(),
@@ -184,6 +241,7 @@ router.post('/:unitId/files', upload.single('fileUpload'), async (req, res) => {
         isNotes: false,
         isLink: true,
         filePath: '',
+        url: linkUrl
       });
     } else {
       return res.status(400).json({ error: 'Invalid file, notes content, or link URL' });
@@ -192,6 +250,7 @@ router.post('/:unitId/files', upload.single('fileUpload'), async (req, res) => {
     const savedFile = await fileData.save();
     unit.files.push(savedFile._id);
     await unit.save();
+    
     const populatedUnit = await Unit.findById(unitId).populate('files');
     res.status(201).json(populatedUnit);
   } catch (err) {
@@ -200,67 +259,32 @@ router.post('/:unitId/files', upload.single('fileUpload'), async (req, res) => {
   }
 });
 
-
-
-// ... (other routes remain the same)
-// Serve file (for downloading or streaming)
 router.get('/files/:fileId', async (req, res) => {
   try {
     const file = await File.findById(req.params.fileId);
-    if (!file || !file.filePath) {
+    if (!file) {
       return res.status(404).json({ error: 'File not found' });
     }
 
-    const filePath = path.resolve(file.filePath);
-    const stat = await fsPromises.stat(filePath);
-
-    if (!stat.isFile()) {
-      return res.status(404).json({ error: 'File not found' });
+    if (file.url) {
+      return res.redirect(file.url);
     }
 
-    // Handle video/audio streaming
-    if (file.type.startsWith('video/') || file.type.startsWith('audio/')) {
-      const range = req.headers.range;
-      if (range) {
-        const parts = range.replace(/bytes=/, '').split('-');
-        const start = parseInt(parts[0], 10);
-        const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
-        const chunkSize = end - start + 1;
-
-        // Set headers for range request
-        res.set({
-          'Content-Range': `bytes ${start}-${end}/${stat.size}`,
-          'Accept-Ranges': 'bytes',
-          'Content-Length': chunkSize,
-          'Content-Type': file.type,
-        });
-        res.status(206);
-
-        const stream = fs.createReadStream(filePath, { start, end });
-        stream.pipe(res);
-      } else {
-        // Full file streaming
-        res.set({
-          'Content-Length': stat.size,
-          'Content-Type': file.type,
-        });
-        fs.createReadStream(filePath).pipe(res);
-      }
-    } else {
-      // Handle downloads for other files (e.g., PDF, images, PPT, Excel, DOC)
+    if (file.isNotes && file.content) {
       res.set({
-        'Content-Type': file.type,
-        'Content-Disposition': `inline; filename="${file.name}"`, // Use inline for previews
+        'Content-Type': 'text/plain',
+        'Content-Disposition': `inline; filename="${file.name}"`
       });
-      fs.createReadStream(filePath).pipe(res);
+      return res.send(file.content);
     }
+
+    res.json(file);
   } catch (err) {
     console.error('Error serving file:', err);
     res.status(500).json({ error: 'Failed to serve file', details: err.message });
   }
 });
 
-// Update unit
 router.put('/:unitId', async (req, res) => {
   try {
     const { unitId } = req.params;
@@ -275,21 +299,16 @@ router.put('/:unitId', async (req, res) => {
       return res.status(404).json({ error: 'Unit not found' });
     }
 
-    // Update unit title
     unit.title = unitTitle;
 
-    // Update or create description file
     if (unitDescription !== undefined) {
-      // Find existing overview file
       const overviewFile = unit.files.find(file => file.title === 'Overview' && file.isNotes);
       if (overviewFile) {
-        // Update existing overview file
         overviewFile.content = unitDescription;
         overviewFile.size = formatFileSize(Buffer.from(unitDescription).length);
         overviewFile.lastModified = new Date().toLocaleDateString();
         await overviewFile.save();
       } else if (unitDescription) {
-        // Create new overview file if description is provided
         const newFile = new File({
           title: 'Overview',
           name: 'overview.txt',
@@ -298,7 +317,9 @@ router.put('/:unitId', async (req, res) => {
           content: unitDescription,
           lastModified: new Date().toLocaleDateString(),
           isNotes: true,
+          isLink: false,
           filePath: '',
+          url: ''
         });
         const savedFile = await newFile.save();
         unit.files.push(savedFile._id);
@@ -314,7 +335,6 @@ router.put('/:unitId', async (req, res) => {
   }
 });
 
-// Update file in unit
 router.put('/:unitId/files/:fileId', upload.single('fileUpload'), async (req, res) => {
   try {
     const { unitId, fileId } = req.params;
@@ -337,23 +357,27 @@ router.put('/:unitId/files/:fileId', upload.single('fileUpload'), async (req, re
     file.title = fileName;
     file.lastModified = new Date().toLocaleDateString();
 
+    const oldFilePath = file.filePath;
+
     if (fileType === 'upload' && req.file) {
-      if (file.filePath && file.filePath !== req.file.path) {
-        try {
-          await fsPromises.unlink(file.filePath);
-        } catch (err) {
-          console.error(`Failed to delete old file ${file.filePath}:`, err);
-        }
+      if (!bucket) {
+        return res.status(500).json({ error: 'Firebase Storage not available' });
+      }
+      
+      const uploadResult = await uploadToFirebase(req.file, fileName);
+      
+      if (oldFilePath) {
+        await deleteFromFirebase(oldFilePath);
       }
 
-      const isTextFile =
-        req.file.mimetype.startsWith('text/') ||
-        req.file.mimetype === 'application/json' ||
-        req.file.originalname.match(/\.(txt|js|html|css|md)$/);
+      const isTextFile = req.file.mimetype.startsWith('text/') ||
+                       req.file.mimetype === 'application/json' ||
+                       req.file.originalname.match(/\.(txt|js|html|css|md)$/);
 
-      const fileContent = isTextFile
-        ? await fsPromises.readFile(req.file.path, 'utf8').catch(() => null)
-        : null;
+      let fileContent = null;
+      if (isTextFile && req.file.buffer) {
+        fileContent = req.file.buffer.toString('utf8');
+      }
 
       file.name = req.file.originalname;
       file.type = req.file.mimetype;
@@ -362,14 +386,11 @@ router.put('/:unitId/files/:fileId', upload.single('fileUpload'), async (req, re
       file.isUploadedFile = true;
       file.isNotes = false;
       file.isLink = false;
-      file.filePath = req.file.path;
+      file.filePath = uploadResult.filePath;
+      file.url = uploadResult.url;
     } else if (fileType === 'notes' && notesContent) {
-      if (file.filePath) {
-        try {
-          await fsPromises.unlink(file.filePath);
-        } catch (err) {
-          console.error(`Failed to delete old file ${file.filePath}:`, err);
-        }
+      if (oldFilePath) {
+        await deleteFromFirebase(oldFilePath);
       }
 
       const blob = Buffer.from(notesContent);
@@ -381,16 +402,14 @@ router.put('/:unitId/files/:fileId', upload.single('fileUpload'), async (req, re
       file.isNotes = true;
       file.isLink = false;
       file.filePath = '';
+      file.url = '';
     } else if (fileType === 'link' && linkUrl) {
       if (!linkUrl.match(/^https?:\/\/[^\s/$.?#].[^\s]*$/)) {
         return res.status(400).json({ error: 'Invalid URL format' });
       }
-      if (file.filePath) {
-        try {
-          await fsPromises.unlink(file.filePath);
-        } catch (err) {
-          console.error(`Failed to delete old file ${file.filePath}:`, err);
-        }
+      
+      if (oldFilePath) {
+        await deleteFromFirebase(oldFilePath);
       }
 
       file.name = fileName;
@@ -401,6 +420,7 @@ router.put('/:unitId/files/:fileId', upload.single('fileUpload'), async (req, re
       file.isNotes = false;
       file.isLink = true;
       file.filePath = '';
+      file.url = linkUrl;
     } else {
       return res.status(400).json({ error: 'Invalid file, notes content, or link URL' });
     }
@@ -414,7 +434,6 @@ router.put('/:unitId/files/:fileId', upload.single('fileUpload'), async (req, re
   }
 });
 
-// Delete unit
 router.delete('/:unitId', async (req, res) => {
   try {
     const { unitId } = req.params;
@@ -424,14 +443,9 @@ router.delete('/:unitId', async (req, res) => {
       return res.status(404).json({ error: 'Unit not found' });
     }
 
-    // Delete associated files
     for (const file of unit.files) {
       if (file.filePath) {
-        try {
-          await fsPromises.unlink(file.filePath);
-        } catch (err) {
-          console.error(`Failed to delete file ${file.filePath}:`, err);
-        }
+        await deleteFromFirebase(file.filePath);
       }
       await File.findByIdAndDelete(file._id);
     }
@@ -444,7 +458,6 @@ router.delete('/:unitId', async (req, res) => {
   }
 });
 
-// Delete file from unit
 router.delete('/:unitId/files/:fileId', async (req, res) => {
   try {
     const { unitId, fileId } = req.params;
@@ -460,16 +473,14 @@ router.delete('/:unitId/files/:fileId', async (req, res) => {
     }
 
     if (file.filePath) {
-      try {
-        await fsPromises.unlink(file.filePath);
-      } catch (err) {
-        console.error(`Failed to delete file ${file.filePath}:`, err);
-      }
+      await deleteFromFirebase(file.filePath);
     }
 
     unit.files = unit.files.filter((f) => f.toString() !== fileId);
     await unit.save();
+    
     await File.findByIdAndDelete(fileId);
+    
     const populatedUnit = await Unit.findById(unitId).populate('files');
     res.json(populatedUnit);
   } catch (err) {
