@@ -2,41 +2,72 @@ const express = require('express');
 const router = express.Router();
 const Assignment = require('../models/Assignment');
 const Submission = require('../models/Submission');
-const fs = require('fs');
-const path = require('path');
 const multer = require('multer');
+const admin = require('firebase-admin');
+const path = require('path');
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    cb(null, 'uploads/');
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
+const bucket = admin.storage().bucket();
 
-const upload = multer({ 
+const storage = multer.memoryStorage();
+const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 5 * 1024 * 1024, // 5MB limit
+    fileSize: 5 * 1024 * 1024
   },
   fileFilter: (req, file, cb) => {
-    // Accept images, PDFs, and documents
     const filetypes = /jpeg|jpg|png|gif|pdf|doc|docx|txt/;
     const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
     const mimetype = filetypes.test(file.mimetype);
-
     if (mimetype && extname) {
       return cb(null, true);
-    } else {
-      cb(new Error('Error: File type not supported!'));
     }
+    cb(new Error('File type not supported'));
   }
 });
 
-// Get all assignments for a class and staff
+const uploadToFirebase = async (file) => {
+  const timestamp = Date.now();
+  const extension = path.extname(file.originalname);
+  const baseName = file.originalname.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9]/g, '_');
+  const uniqueName = `${baseName}_${timestamp}_${Math.random().toString(36).substring(2, 9)}${extension}`;
+  const filePath = `assignments/${uniqueName}`;
+
+  const fileRef = bucket.file(filePath);
+
+  await fileRef.save(file.buffer, {
+    metadata: {
+      contentType: file.mimetype,
+      metadata: {
+        originalName: file.originalname,
+        uploadedAt: new Date().toISOString(),
+        size: file.size
+      }
+    }
+  });
+
+  await fileRef.makePublic();
+
+  const publicUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+
+  return {
+    url: publicUrl,
+    filePath: filePath,
+    name: file.originalname,
+    size: file.size,
+    type: file.mimetype
+  };
+};
+
+const deleteFromFirebase = async (filePath) => {
+  if (!filePath) return;
+  try {
+    const fileRef = bucket.file(filePath);
+    await fileRef.delete();
+  } catch (err) {
+    // silent fail - log only in development if needed
+  }
+};
+
 router.get('/:classId/staff/:staffId', async (req, res) => {
   try {
     const assignments = await Assignment.find({
@@ -44,7 +75,6 @@ router.get('/:classId/staff/:staffId', async (req, res) => {
       staffId: req.params.staffId
     }).sort({ createdAt: -1 });
 
-    // Calculate unique student count for each assignment
     const assignmentsWithStudentCount = await Promise.all(
       assignments.map(async (assignment) => {
         const submissions = await Submission.find({ assignmentId: assignment._id });
@@ -58,7 +88,6 @@ router.get('/:classId/staff/:staffId', async (req, res) => {
 
     res.json(assignmentsWithStudentCount);
   } catch (err) {
-    console.error('Error fetching staff assignments:', err);
     res.status(500).json({
       message: 'Failed to fetch assignments',
       error: err.message
@@ -66,7 +95,6 @@ router.get('/:classId/staff/:staffId', async (req, res) => {
   }
 });
 
-// Get all assignments for a class (for students)
 router.get('/:classId/student/:studentId', async (req, res) => {
   try {
     const assignments = await Assignment.find({
@@ -74,7 +102,6 @@ router.get('/:classId/student/:studentId', async (req, res) => {
     }).sort({ createdAt: -1 });
     res.json(assignments);
   } catch (err) {
-    console.error('Error fetching student assignments:', err);
     res.status(500).json({
       message: 'Failed to fetch assignments',
       error: err.message
@@ -82,13 +109,8 @@ router.get('/:classId/student/:studentId', async (req, res) => {
   }
 });
 
-// Create a new assignment (with optional file uploads)
 router.post('/staff/:staffId', upload.any(), async (req, res) => {
   try {
-    console.log('Creating assignment with data:', req.body);
-    console.log('Staff ID from params:', req.params.staffId);
-    console.log('Uploaded files:', req.files);
-    
     const { 
       classId, 
       type = 'assignment', 
@@ -97,31 +119,15 @@ router.post('/staff/:staffId', upload.any(), async (req, res) => {
       assignmentType, 
       question = null, 
       dueDate = null,
-      questions, // Could be stringified or parsed
+      questions, 
       meetLink = null,
       meetTime = null 
     } = req.body;
 
-    // Simple validation
-    if (!classId) {
-      return res.status(400).json({ 
-        message: 'Missing required field: classId'
-      });
-    }
-    
-    if (!title) {
-      return res.status(400).json({ 
-        message: 'Missing required field: title'
-      });
-    }
-    
-    if (!assignmentType) {
-      return res.status(400).json({ 
-        message: 'Missing required field: assignmentType'
-      });
+    if (!classId || !title || !assignmentType) {
+      return res.status(400).json({ message: 'Missing required fields' });
     }
 
-    // Validate assignmentType - now includes meeting types
     const validAssignmentTypes = ['question', 'mcq', 'meet-google', 'meet-zoom', 'meet-teams'];
     if (!validAssignmentTypes.includes(assignmentType)) {
       return res.status(400).json({ 
@@ -130,143 +136,93 @@ router.post('/staff/:staffId', upload.any(), async (req, res) => {
     }
 
     let parsedQuestions = null;
-    
-    // Special handling for meeting type assignments
+
     if (assignmentType.startsWith('meet-')) {
-      // For meetings, we need meetLink
       if (!meetLink) {
-        return res.status(400).json({ 
-          message: 'Meeting assignments must have a meetLink'
-        });
+        return res.status(400).json({ message: 'Meeting assignments must have a meetLink' });
       }
-      
-      // Validate meetLink is a valid URL
       try {
         new URL(meetLink);
-      } catch (urlErr) {
-        return res.status(400).json({ 
-          message: 'Invalid meetLink URL format'
-        });
+      } catch {
+        return res.status(400).json({ message: 'Invalid meetLink URL format' });
       }
-      
-      // Don't validate or parse questions for meeting types
     } else if (assignmentType === 'mcq') {
-      // Parse and validate MCQ questions
       try {
-        // Parse questions if they're stringified
-        if (typeof questions === 'string') {
-          parsedQuestions = JSON.parse(questions);
-        } else if (Array.isArray(questions)) {
-          parsedQuestions = questions;
-        } else {
-          return res.status(400).json({ 
-            message: 'MCQ assignments must have questions data' 
-          });
-        }
-        
-        console.log('Parsed questions count:', parsedQuestions.length);
-        
-        // Basic validation
+        parsedQuestions = typeof questions === 'string' ? JSON.parse(questions) : questions;
         if (!Array.isArray(parsedQuestions) || parsedQuestions.length === 0) {
-          return res.status(400).json({ 
-            message: 'MCQ assignments must have at least one question' 
-          });
+          return res.status(400).json({ message: 'MCQ assignments must have questions data' });
         }
-        
-        // Validate each question
+
         for (let i = 0; i < parsedQuestions.length; i++) {
           const q = parsedQuestions[i];
           if (!q.question || q.question.trim() === '') {
-            return res.status(400).json({ 
-              message: `Question ${i + 1} cannot be empty` 
-            });
+            return res.status(400).json({ message: `Question ${i + 1} cannot be empty` });
           }
           if (!q.options || !Array.isArray(q.options) || q.options.length < 2) {
-            return res.status(400).json({ 
-              message: `Question ${i + 1} must have at least 2 options` 
-            });
+            return res.status(400).json({ message: `Question ${i + 1} must have at least 2 options` });
           }
           if (q.correctOption === null || q.correctOption === undefined) {
-            return res.status(400).json({ 
-              message: `Question ${i + 1} must have a correct answer selected` 
-            });
+            return res.status(400).json({ message: `Question ${i + 1} must have a correct answer selected` });
           }
         }
 
-        // Handle files for MCQ questions
         if (req.files && req.files.length > 0) {
           for (const question of parsedQuestions) {
             const fileField = `questionFile_${question.id}`;
             const file = req.files.find(f => f.fieldname === fileField);
 
             if (file) {
-              // Set new file information
-              question.filePath = '/uploads/' + file.filename;
-              question.fileName = file.originalname || file.filename;
+              const uploadResult = await uploadToFirebase(file);
+              question.fileUrl = uploadResult.url;
+              question.filePath = uploadResult.filePath;
+              question.fileName = uploadResult.name;
+              question.fileSize = uploadResult.size;
+              question.fileType = uploadResult.type;
               question.hasFile = true;
             } else if (question.hasFile === false) {
-              // If explicitly set to false, clear file info
+              question.fileUrl = null;
               question.filePath = null;
               question.fileName = '';
               question.hasFile = false;
-            } else {
-              // Keep existing file info if present
-              question.hasFile = question.hasFile || false;
             }
           }
-        } else {
-          // No files uploaded, ensure file info is set properly
-          for (const question of parsedQuestions) {
-            question.hasFile = question.hasFile || false;
-            question.filePath = question.filePath || null;
-            question.fileName = question.fileName || '';
-          }
         }
-      } catch (parseErr) {
-        console.error('Error parsing questions:', parseErr);
+      } catch (err) {
         return res.status(400).json({ 
           message: 'Invalid questions format',
-          error: parseErr.message 
+          error: err.message 
         });
       }
     }
 
-    // For question type assignment, validate question field
     if (assignmentType === 'question' && (!question || question.trim() === '')) {
-      return res.status(400).json({ 
-        message: 'Question type assignments must have a question' 
-      });
+      return res.status(400).json({ message: 'Question type assignments must have a question' });
     }
 
     const assignment = new Assignment({
-      classId: classId,
+      classId,
       staffId: req.params.staffId,
-      type: assignmentType.startsWith('meet-') ? 'meeting' : 'assignment', // Set type based on assignmentType
-      title: title,
-      description: description,
-      assignmentType: assignmentType,
+      type: assignmentType.startsWith('meet-') ? 'meeting' : 'assignment',
+      title,
+      description,
+      assignmentType,
       question: assignmentType === 'question' ? question : null,
-      dueDate: dueDate,
+      dueDate,
       questions: assignmentType === 'mcq' ? parsedQuestions : null,
-      meetTime: meetTime,
-      meetLink: meetLink,
+      meetTime,
+      meetLink
     });
 
     const newAssignment = await assignment.save();
-    console.log('Assignment created successfully:', newAssignment._id);
-    
     res.status(201).json(newAssignment);
   } catch (err) {
-    console.error('Error creating assignment:', err);
     res.status(400).json({
       message: 'Failed to create assignment',
-      error: err.message,
-      stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+      error: err.message
     });
   }
 });
 
-// Update an assignment (with optional file uploads)
 router.put('/:id/staff/:staffId', upload.any(), async (req, res) => {
   try {
     const assignment = await Assignment.findOne({
@@ -274,7 +230,7 @@ router.put('/:id/staff/:staffId', upload.any(), async (req, res) => {
       staffId: req.params.staffId,
     });
     if (!assignment) {
-      return res.status(404).json({ message: 'Assignment not found or you are not authorized' });
+      return res.status(404).json({ message: 'Assignment not found or unauthorized' });
     }
 
     const { 
@@ -289,7 +245,6 @@ router.put('/:id/staff/:staffId', upload.any(), async (req, res) => {
       questions 
     } = req.body;
 
-    // Update assignment fields
     if (type !== undefined) assignment.type = type;
     if (title !== undefined) assignment.title = title;
     if (description !== undefined) assignment.description = description;
@@ -298,139 +253,100 @@ router.put('/:id/staff/:staffId', upload.any(), async (req, res) => {
     if (dueDate !== undefined) assignment.dueDate = dueDate;
     if (meetTime !== undefined) assignment.meetTime = meetTime;
     if (meetLink !== undefined) assignment.meetLink = meetLink;
-    
-    // Update questions for MCQ assignments
+
     if (assignmentType === 'mcq' && questions !== undefined) {
       try {
-        // Parse questions if they're stringified
-        let parsedQuestions;
-        if (typeof questions === 'string') {
-          parsedQuestions = JSON.parse(questions);
-        } else if (Array.isArray(questions)) {
-          parsedQuestions = questions;
-        } else {
-          return res.status(400).json({ 
-            message: 'Invalid questions data format' 
-          });
+        let parsedQuestions = typeof questions === 'string' ? JSON.parse(questions) : questions;
+
+        if (!Array.isArray(parsedQuestions)) {
+          return res.status(400).json({ message: 'Questions must be an array' });
         }
-        
-        // Validate questions
-        if (Array.isArray(parsedQuestions)) {
-          for (let i = 0; i < parsedQuestions.length; i++) {
-            const q = parsedQuestions[i];
-            if (!q.question || q.question.trim() === '') {
-              throw new Error(`Question ${i + 1} cannot be empty`);
-            }
-            if (!q.options || !Array.isArray(q.options) || q.options.length < 2) {
-              throw new Error(`Question ${i + 1} must have at least 2 options`);
-            }
-            if (q.correctOption === null || q.correctOption === undefined) {
-              throw new Error(`Question ${i + 1} must have a correct answer selected`);
-            }
+
+        for (let i = 0; i < parsedQuestions.length; i++) {
+          const q = parsedQuestions[i];
+          if (!q.question || q.question.trim() === '') {
+            throw new Error(`Question ${i + 1} cannot be empty`);
           }
-
-          // Handle removed questions - delete their files
-          const oldQuestions = assignment.questions || [];
-          const newQuestionIds = parsedQuestions.map(q => q.id);
-          const removedQuestions = oldQuestions.filter(q => !newQuestionIds.includes(q.id));
-          for (const removed of removedQuestions) {
-            if (removed.filePath) {
-              try {
-                const fullPath = path.join(__dirname, '..', removed.filePath);
-                if (fs.existsSync(fullPath)) {
-                  fs.unlinkSync(fullPath);
-                }
-              } catch (fileErr) {
-                console.error(`Failed to delete file for removed question: ${fileErr.message}`);
-              }
-            }
+          if (!q.options || !Array.isArray(q.options) || q.options.length < 2) {
+            throw new Error(`Question ${i + 1} must have at least 2 options`);
           }
-
-          // Handle files for remaining/updated questions
-          if (req.files && req.files.length > 0) {
-            for (const question of parsedQuestions) {
-              const fileField = `questionFile_${question.id}`;
-              const file = req.files.find(f => f.fieldname === fileField);
-
-              if (file) {
-                // Find old question to check for existing file
-                const oldQuestion = oldQuestions.find(q => q.id === question.id);
-                
-                // Delete old file if exists
-                if (oldQuestion && oldQuestion.filePath) {
-                  try {
-                    const oldPath = path.join(__dirname, '..', oldQuestion.filePath);
-                    if (fs.existsSync(oldPath)) {
-                      fs.unlinkSync(oldPath);
-                    }
-                  } catch (fileErr) {
-                    console.error(`Failed to delete old file: ${fileErr.message}`);
-                  }
-                }
-                
-                // Set new file
-                question.filePath = '/uploads/' + file.filename;
-                question.fileName = file.originalname || file.filename;
-                question.hasFile = true;
-              } else {
-                // Keep existing file info if question exists
-                const existingQuestion = oldQuestions.find(q => q.id === question.id);
-                if (existingQuestion) {
-                  question.filePath = existingQuestion.filePath;
-                  question.fileName = existingQuestion.fileName;
-                  question.hasFile = existingQuestion.hasFile || false;
-                } else {
-                  // New question without file
-                  question.hasFile = question.hasFile || false;
-                  question.filePath = question.filePath || null;
-                  question.fileName = question.fileName || '';
-                }
-              }
-            }
-          } else {
-            // No new files, preserve existing file info
-            for (const question of parsedQuestions) {
-              const existingQuestion = oldQuestions.find(q => q.id === question.id);
-              if (existingQuestion) {
-                question.filePath = existingQuestion.filePath;
-                question.fileName = existingQuestion.fileName;
-                question.hasFile = existingQuestion.hasFile || false;
-              } else {
-                question.hasFile = question.hasFile || false;
-                question.filePath = question.filePath || null;
-                question.fileName = question.fileName || '';
-              }
-            }
+          if (q.correctOption === null || q.correctOption === undefined) {
+            throw new Error(`Question ${i + 1} must have a correct answer selected`);
           }
-
-          assignment.questions = parsedQuestions;
-        } else {
-          return res.status(400).json({ 
-            message: 'Questions must be an array' 
-          });
         }
-      } catch (parseErr) {
+
+        const oldQuestions = assignment.questions || [];
+        const newQuestionIds = parsedQuestions.map(q => q.id);
+
+        const removedQuestions = oldQuestions.filter(q => !newQuestionIds.includes(q.id));
+        for (const removed of removedQuestions) {
+          if (removed.filePath) await deleteFromFirebase(removed.filePath);
+        }
+
+        if (req.files && req.files.length > 0) {
+          for (const question of parsedQuestions) {
+            const fileField = `questionFile_${question.id}`;
+            const file = req.files.find(f => f.fieldname === fileField);
+
+            if (file) {
+              const oldQuestion = oldQuestions.find(q => q.id === question.id);
+              if (oldQuestion && oldQuestion.filePath) {
+                await deleteFromFirebase(oldQuestion.filePath);
+              }
+
+              const uploadResult = await uploadToFirebase(file);
+              question.fileUrl = uploadResult.url;
+              question.filePath = uploadResult.filePath;
+              question.fileName = uploadResult.name;
+              question.fileSize = uploadResult.size;
+              question.fileType = uploadResult.type;
+              question.hasFile = true;
+            } else {
+              const existing = oldQuestions.find(q => q.id === question.id);
+              if (existing) {
+                question.fileUrl = existing.fileUrl;
+                question.filePath = existing.filePath;
+                question.fileName = existing.fileName;
+                question.fileSize = existing.fileSize;
+                question.fileType = existing.fileType;
+                question.hasFile = existing.hasFile;
+              }
+            }
+          }
+        } else {
+          for (const question of parsedQuestions) {
+            const existing = oldQuestions.find(q => q.id === question.id);
+            if (existing) {
+              question.fileUrl = existing.fileUrl;
+              question.filePath = existing.filePath;
+              question.fileName = existing.fileName;
+              question.fileSize = existing.fileSize;
+              question.fileType = existing.fileType;
+              question.hasFile = existing.hasFile;
+            }
+          }
+        }
+
+        assignment.questions = parsedQuestions;
+      } catch (err) {
         return res.status(400).json({ 
           message: 'Invalid questions data',
-          error: parseErr.message 
+          error: err.message 
         });
       }
     }
 
     assignment.updatedAt = Date.now();
-
     const updatedAssignment = await assignment.save();
     res.json(updatedAssignment);
   } catch (err) {
-    console.error('Error updating assignment:', err);
     res.status(400).json({
       message: 'Failed to update assignment',
-      error: err.message,
+      error: err.message
     });
   }
 });
 
-// Delete an assignment
 router.delete('/:id/staff/:staffId', async (req, res) => {
   try {
     const assignment = await Assignment.findOne({
@@ -438,36 +354,23 @@ router.delete('/:id/staff/:staffId', async (req, res) => {
       staffId: req.params.staffId
     });
     if (!assignment) {
-      return res.status(404).json({ message: 'Assignment not found or you are not authorized' });
+      return res.status(404).json({ message: 'Assignment not found or unauthorized' });
     }
 
-    // Delete MCQ question files
     if (assignment.assignmentType === 'mcq' && assignment.questions) {
       for (const question of assignment.questions) {
         if (question.filePath) {
-          try {
-            const fullPath = path.join(__dirname, '..', question.filePath);
-            if (fs.existsSync(fullPath)) {
-              fs.unlinkSync(fullPath);
-            }
-          } catch (fileErr) {
-            console.error(`Failed to delete MCQ file ${question.filePath}:`, fileErr.message);
-          }
+          await deleteFromFirebase(question.filePath);
         }
       }
     }
 
-    // Delete submission files
     const submissions = await Submission.find({ assignmentId: req.params.id });
     for (const submission of submissions) {
       if (submission.files && submission.files.length > 0) {
         for (const file of submission.files) {
-          try {
-            if (file.path && fs.existsSync(file.path)) {
-              fs.unlinkSync(file.path);
-            }
-          } catch (fileErr) {
-            console.error(`Failed to delete file ${file.path}:`, fileErr.message);
+          if (file.path) {
+            await deleteFromFirebase(file.path);
           }
         }
       }
@@ -481,7 +384,6 @@ router.delete('/:id/staff/:staffId', async (req, res) => {
       message: 'Assignment and associated submissions deleted successfully'
     });
   } catch (err) {
-    console.error('Error deleting assignment:', err);
     res.status(500).json({
       message: 'Failed to delete assignment',
       error: err.message
@@ -489,14 +391,12 @@ router.delete('/:id/staff/:staffId', async (req, res) => {
   }
 });
 
-// Get all submissions for an assignment
 router.get('/:id/submissions', async (req, res) => {
   try {
     const submissions = await Submission.find({ assignmentId: req.params.id })
       .sort({ submissionDate: -1 });
     res.json(submissions);
   } catch (err) {
-    console.error('Error fetching submissions:', err);
     res.status(500).json({
       message: 'Failed to fetch submissions',
       error: err.message
@@ -504,15 +404,12 @@ router.get('/:id/submissions', async (req, res) => {
   }
 });
 
-// New endpoint for MCQ submissions
 router.post('/:id/mcq-submit', async (req, res) => {
   try {
     const { studentId, studentName, answers } = req.body;
     
     if (!studentId || !studentName || !answers) {
-      return res.status(400).json({ 
-        message: 'Missing required fields: studentId, studentName, or answers' 
-      });
+      return res.status(400).json({ message: 'Missing required fields' });
     }
 
     const assignment = await Assignment.findById(req.params.id);
@@ -524,7 +421,6 @@ router.post('/:id/mcq-submit', async (req, res) => {
       return res.status(400).json({ message: 'This is not an MCQ assignment' });
     }
 
-    // Calculate score
     let score = 0;
     const totalQuestions = assignment.questions.length;
     
@@ -536,7 +432,6 @@ router.post('/:id/mcq-submit', async (req, res) => {
 
     const percentage = Math.round((score / totalQuestions) * 100);
 
-    // Create or update submission
     const existingSubmission = await Submission.findOne({
       assignmentId: req.params.id,
       studentId: studentId
@@ -552,16 +447,16 @@ router.post('/:id/mcq-submit', async (req, res) => {
         success: true,
         message: 'MCQ submission updated successfully',
         submission: existingSubmission,
-        score: score,
-        totalQuestions: totalQuestions,
-        percentage: percentage
+        score,
+        totalQuestions,
+        percentage
       });
     } else {
       const submission = new Submission({
         assignmentId: req.params.id,
         classId: assignment.classId,
-        studentId: studentId,
-        studentName: studentName,
+        studentId,
+        studentName,
         answer: JSON.stringify(answers),
         submitted: true,
         marks: percentage
@@ -572,13 +467,12 @@ router.post('/:id/mcq-submit', async (req, res) => {
         success: true,
         message: 'MCQ submitted successfully',
         submission: newSubmission,
-        score: score,
-        totalQuestions: totalQuestions,
-        percentage: percentage
+        score,
+        totalQuestions,
+        percentage
       });
     }
   } catch (err) {
-    console.error('Error submitting MCQ:', err);
     res.status(500).json({
       message: 'Failed to submit MCQ',
       error: err.message
@@ -586,7 +480,6 @@ router.post('/:id/mcq-submit', async (req, res) => {
   }
 });
 
-// Get MCQ submission for a student
 router.get('/:id/mcq-submission/:studentId', async (req, res) => {
   try {
     const submission = await Submission.findOne({
@@ -603,10 +496,9 @@ router.get('/:id/mcq-submission/:studentId', async (req, res) => {
 
     res.json({
       success: true,
-      submission: submission
+      submission
     });
   } catch (err) {
-    console.error('Error fetching MCQ submission:', err);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch submission',
@@ -615,7 +507,6 @@ router.get('/:id/mcq-submission/:studentId', async (req, res) => {
   }
 });
 
-// Get a specific assignment
 router.get('/:id', async (req, res) => {
   try {
     const assignment = await Assignment.findById(req.params.id);
@@ -624,7 +515,6 @@ router.get('/:id', async (req, res) => {
     }
     res.json(assignment);
   } catch (err) {
-    console.error('Error fetching assignment:', err);
     res.status(500).json({
       message: 'Failed to fetch assignment',
       error: err.message
@@ -632,7 +522,6 @@ router.get('/:id', async (req, res) => {
   }
 });
 
-// Get student's submission for an assignment
 router.get('/:id/submission/:studentId', async (req, res) => {
   try {
     const submission = await Submission.findOne({
@@ -649,10 +538,9 @@ router.get('/:id/submission/:studentId', async (req, res) => {
     
     res.json({
       success: true,
-      submission: submission
+      submission
     });
   } catch (err) {
-    console.error('Error fetching submission:', err);
     res.status(500).json({
       success: false,
       message: 'Failed to fetch submission',

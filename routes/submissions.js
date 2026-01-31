@@ -1,35 +1,89 @@
-// routes/submissions.js
 const express = require('express');
 const router = express.Router();
-const mongoose = require('mongoose'); // Make sure this is imported
+const mongoose = require('mongoose');
 const Submission = require('../models/Submission');
 const Assignment = require('../models/Assignment');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const admin = require('firebase-admin');
 
-// Configure multer for file uploads
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const uploadDir = 'uploads/';
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
-  }
-});
+const bucket = admin.storage().bucket();
 
-const upload = multer({ 
+const storage = multer.memoryStorage();
+const upload = multer({
   storage,
   limits: {
-    fileSize: 50 * 1024 * 1024 // 50MB max file size
+    fileSize: 50 * 1024 * 1024 // 50MB
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      'image/jpeg', 'image/jpg', 'image/png', 'image/gif',
+      'application/pdf', 'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'text/plain', 'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    ];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('File type not supported'));
+    }
   }
 });
 
-// Get submission status for all assignments in a class for a student
+const uploadToFirebase = async (file, assignmentId, studentId) => {
+  if (!bucket) {
+    throw new Error('Firebase Storage not available');
+  }
+
+  const timestamp = Date.now();
+  const originalName = file.originalname;
+  const extension = originalName.split('.').pop();
+  const baseName = originalName.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9]/g, '_');
+  const uniqueName = `${baseName}_${timestamp}_${Math.random().toString(36).substring(2, 9)}.${extension}`;
+  const filePath = `submissions/${assignmentId}/${studentId}/${uniqueName}`;
+
+  const fileRef = bucket.file(filePath);
+
+  await fileRef.save(file.buffer, {
+    metadata: {
+      contentType: file.mimetype,
+      metadata: {
+        originalName,
+        uploadedAt: new Date().toISOString(),
+        assignmentId,
+        studentId,
+        size: file.size
+      }
+    }
+  });
+
+  await fileRef.makePublic();
+
+  const publicUrl = `https://storage.googleapis.com/${bucket.name}/${filePath}`;
+
+  return {
+    url: publicUrl,
+    filePath,
+    name: originalName,
+    type: file.mimetype,
+    size: file.size,
+    uploadedAt: new Date().toISOString()
+  };
+};
+
+const deleteFromFirebase = async (filePath) => {
+  if (!bucket || !filePath) return;
+  try {
+    const fileRef = bucket.file(filePath);
+    const [exists] = await fileRef.exists();
+    if (exists) {
+      await fileRef.delete();
+    }
+  } catch {
+    // silent fail - file may already be gone
+  }
+};
+
 router.get('/status/:classId/student/:studentId', async (req, res) => {
   try {
     const submissions = await Submission.find({
@@ -37,20 +91,20 @@ router.get('/status/:classId/student/:studentId', async (req, res) => {
       studentId: req.params.studentId
     })
       .select('assignmentId submitted submissionDate answer files studentName marks staffComment')
-      .populate('files', 'name url type size _id');
+      .sort({ submissionDate: -1 });
 
     const status = {};
     submissions.forEach(sub => {
       if (!status[sub.assignmentId]) {
         status[sub.assignmentId] = { submissions: [] };
       }
-      if (sub.answer || sub.files.length > 0) {
+      if (sub.answer || (sub.files && sub.files.length > 0)) {
         status[sub.assignmentId].submissions.push({
           _id: sub._id,
           submitted: true,
           submissionDate: sub.submissionDate,
           answer: sub.answer,
-          files: sub.files,
+          files: sub.files || [],
           studentName: sub.studentName,
           marks: sub.marks,
           staffComment: sub.staffComment
@@ -74,177 +128,216 @@ router.get('/status/:classId/student/:studentId', async (req, res) => {
   }
 });
 
-// Create a new submission
-router.post('/', upload.array('files'), async (req, res) => {
+router.post('/', upload.array('files', 10), async (req, res) => {
   try {
     const { assignmentId, classId, studentId, answer, studentName } = req.body;
 
     if (!assignmentId || !classId || !studentId) {
-      return res.status(400).json({ message: 'Missing required fields' });
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required fields: assignmentId, classId, studentId'
+      });
     }
 
-    const files = req.files.map(file => ({
-      name: file.originalname,
-      path: file.path,
-      type: file.mimetype,
-      size: file.size,
-      url: `/uploads/${file.filename}`
-    }));
-
-    if (!answer && files.length === 0) {
-      return res.status(400).json({ message: 'Submission must include an answer or files' });
+    const assignment = await Assignment.findById(assignmentId);
+    if (!assignment) {
+      return res.status(404).json({
+        success: false,
+        message: 'Assignment not found'
+      });
     }
 
-    const submission = new Submission({
+    let uploadedFiles = [];
+    if (req.files && req.files.length > 0) {
+      for (const file of req.files) {
+        const firebaseFile = await uploadToFirebase(file, assignmentId, studentId);
+        uploadedFiles.push({
+          name: firebaseFile.name,
+          path: firebaseFile.filePath,
+          url: firebaseFile.url,
+          type: firebaseFile.type,
+          size: firebaseFile.size,
+          uploadedAt: firebaseFile.uploadedAt
+        });
+      }
+    }
+
+    if (!answer && uploadedFiles.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Submission must include an answer or at least one file'
+      });
+    }
+
+    const existingSubmission = await Submission.findOne({
       assignmentId,
-      classId,
-      studentId,
-      answer,
-      files,
-      submitted: true,
-      submissionDate: new Date(),
-      studentName
+      studentId
     });
 
-    await submission.save();
-    res.status(201).json(submission);
+    let submission;
+    const submissionDate = new Date();
+
+    if (existingSubmission) {
+      existingSubmission.answer = answer || existingSubmission.answer;
+      existingSubmission.files = [...(existingSubmission.files || []), ...uploadedFiles];
+      existingSubmission.submitted = true;
+      existingSubmission.submissionDate = submissionDate;
+      existingSubmission.studentName = studentName || existingSubmission.studentName;
+      existingSubmission.updatedAt = submissionDate;
+      submission = await existingSubmission.save();
+    } else {
+      submission = new Submission({
+        assignmentId,
+        classId,
+        studentId,
+        answer: answer || '',
+        files: uploadedFiles,
+        submitted: true,
+        submissionDate,
+        studentName: studentName || 'Unknown Student',
+        createdAt: submissionDate,
+        updatedAt: submissionDate
+      });
+      await submission.save();
+    }
+
+    res.status(201).json({
+      success: true,
+      message: 'Submission saved successfully',
+      submission,
+      files: uploadedFiles
+    });
   } catch (err) {
-    res.status(400).json({ message: err.message });
+    res.status(400).json({
+      success: false,
+      message: 'Failed to submit assignment',
+      error: err.message
+    });
   }
 });
 
-// Delete a submission
 router.delete('/:id', async (req, res) => {
   try {
     const submission = await Submission.findById(req.params.id);
     if (!submission) {
-      return res.status(404).json({ message: 'Submission not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
     }
 
-    for (const file of submission.files) {
-      try {
-        if (file.path && fs.existsSync(file.path)) {
-          fs.unlinkSync(file.path);
-        }
-      } catch (fileErr) {
-        console.error(`Failed to delete file ${file.path}:`, fileErr.message);
+    if (submission.files && submission.files.length > 0) {
+      for (const file of submission.files) {
+        if (file.path) await deleteFromFirebase(file.path);
       }
     }
 
     await submission.deleteOne();
-    res.json({ message: 'Submission deleted' });
+    res.json({
+      success: true,
+      message: 'Submission deleted successfully'
+    });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete submission',
+      error: err.message
+    });
   }
 });
 
-// Delete a specific file from a submission
 router.delete('/:submissionId/file/:fileId', async (req, res) => {
   try {
     const submission = await Submission.findById(req.params.submissionId);
     if (!submission) {
-      return res.status(404).json({ message: 'Submission not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
     }
 
-    const fileIndex = submission.files.findIndex(file => file._id.toString() === req.params.fileId);
+    const fileIndex = submission.files.findIndex(file =>
+      file._id && file._id.toString() === req.params.fileId
+    );
+
     if (fileIndex === -1) {
-      return res.status(404).json({ message: 'File not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'File not found in submission'
+      });
     }
 
     const file = submission.files[fileIndex];
-    try {
-      if (file.path && fs.existsSync(file.path)) {
-        fs.unlinkSync(file.path);
-      }
-    } catch (fileErr) {
-      console.error(`Failed to delete file ${file.path}:`, fileErr.message);
-    }
+    if (file.path) await deleteFromFirebase(file.path);
 
     submission.files.splice(fileIndex, 1);
 
     if (!submission.answer && submission.files.length === 0) {
       await submission.deleteOne();
-      return res.json({ message: 'File and empty submission deleted successfully' });
+      return res.json({
+        success: true,
+        message: 'File and empty submission deleted successfully'
+      });
     }
 
+    submission.updatedAt = Date.now();
     await submission.save();
-    res.json({ message: 'File deleted successfully' });
+
+    res.json({
+      success: true,
+      message: 'File deleted successfully'
+    });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete file',
+      error: err.message
+    });
   }
 });
 
-// UPDATE SUBMISSION FEEDBACK - FIXED with better error handling
 router.patch('/:id/feedback', async (req, res) => {
-  console.log('=== FEEDBACK UPDATE REQUEST ===');
-  console.log('Submission ID:', req.params.id);
-  console.log('Request Body:', req.body);
-  console.log('Request Headers:', req.headers);
-  
   try {
-    // Validate ObjectId format
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      console.log('Invalid ObjectId format');
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Invalid submission ID format' 
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid submission ID format'
       });
     }
 
-    console.log('Looking for submission with ID:', req.params.id);
-    
     const submission = await Submission.findById(req.params.id);
     if (!submission) {
-      console.log('Submission not found in database');
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Submission not found' 
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
       });
     }
 
-    console.log('Found submission:', {
-      id: submission._id,
-      marks: submission.marks,
-      staffComment: submission.staffComment,
-      assignmentId: submission.assignmentId,
-      studentId: submission.studentId
-    });
-
-    // Parse marks if provided
     if (req.body.marks !== undefined) {
       if (req.body.marks === '' || req.body.marks === null) {
         submission.marks = null;
-        console.log('Setting marks to null');
       } else {
-        // Try to convert to number
-        const marksValue = req.body.marks;
-        const marksNum = typeof marksValue === 'string' ? parseFloat(marksValue) : marksValue;
-        
+        const marksNum = typeof req.body.marks === 'string'
+          ? parseFloat(req.body.marks)
+          : req.body.marks;
+
         if (isNaN(marksNum)) {
-          console.log('Invalid marks value:', marksValue);
           return res.status(400).json({
             success: false,
             message: 'Invalid marks value. Must be a number.'
           });
         }
-        
         submission.marks = marksNum;
-        console.log('Setting marks to:', marksNum);
       }
     }
 
-    // Update comment if provided
     if (req.body.comment !== undefined) {
       submission.staffComment = req.body.comment || '';
-      console.log('Setting comment to:', submission.staffComment);
     }
 
     submission.updatedAt = Date.now();
-    
-    console.log('Attempting to save submission...');
     const savedSubmission = await submission.save();
-    console.log('Submission saved successfully:', savedSubmission._id);
-    
+
     res.json({
       success: true,
       message: 'Feedback saved successfully',
@@ -255,56 +348,57 @@ router.patch('/:id/feedback', async (req, res) => {
         updatedAt: savedSubmission.updatedAt
       }
     });
-    
   } catch (err) {
-    console.error('=== ERROR UPDATING FEEDBACK ===');
-    console.error('Error name:', err.name);
-    console.error('Error message:', err.message);
-    console.error('Error stack:', err.stack);
-    
-    // Check if it's a validation error
-    if (err.name === 'ValidationError') {
-      console.error('Validation errors:', err.errors);
-    }
-    
-    // Check if it's a CastError
-    if (err.name === 'CastError') {
-      console.error('Cast error details:', err);
-    }
-    
-    res.status(500).json({ 
+    res.status(500).json({
       success: false,
       message: 'Failed to save feedback',
-      error: err.message,
-      errorType: err.name
+      error: err.message
     });
   }
 });
 
-// Get a specific submission by ID
 router.get('/:id', async (req, res) => {
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ message: 'Invalid submission ID format' });
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid submission ID format'
+      });
     }
-    
+
     const submission = await Submission.findById(req.params.id);
     if (!submission) {
-      return res.status(404).json({ message: 'Submission not found' });
+      return res.status(404).json({
+        success: false,
+        message: 'Submission not found'
+      });
     }
-    res.json(submission);
+
+    res.json({
+      success: true,
+      submission
+    });
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    res.status(500).json({
+      success: false,
+      message: 'Failed to fetch submission',
+      error: err.message
+    });
   }
 });
 
-// Test endpoint to check if submission exists
 router.get('/test/:id/exists', async (req, res) => {
   try {
     const exists = await Submission.exists({ _id: req.params.id });
-    res.json({ exists: !!exists });
+    res.json({
+      success: true,
+      exists: !!exists
+    });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 });
 
