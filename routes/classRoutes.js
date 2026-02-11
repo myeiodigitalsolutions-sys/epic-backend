@@ -5,29 +5,6 @@ const Class = require('../models/Class');
 const Staff = require('../models/Staff');
 const Student = require('../models/Students');
 
-async function enrollStudentInClass({ classId, student }) {
-  // 1️⃣ Add student to class
-  await Class.findByIdAndUpdate(classId, {
-    $addToSet: {
-      students: {
-        studentId: student._id.toString(),
-        name: student.name || student.email.split('@')[0],
-        email: student.email,
-        rollNumber: student.rollNumber || '',
-        batch: student.batch || '',
-        major: student.major || '',
-        joinedAt: new Date()
-      }
-    }
-  });
-
-  // 2️⃣ Add class to student
-  await Student.findByIdAndUpdate(student._id, {
-    $addToSet: {
-      classes: classId
-    }
-  });
-}
 
 
 // Create a new class
@@ -629,87 +606,82 @@ router.get('/:classId/people/student/:studentId', async (req, res) => {
   }
 });
 
+// New POST route to add a student to a classroom
 router.post('/:classId/people/staff/:staffId', async (req, res) => {
   try {
     const { classId, staffId } = req.params;
     const { studentEmail } = req.body;
 
-    const classData = await Class.findById(classId);
-    if (!classData) return res.status(404).json({ error: 'Class not found' });
-
-    const isAuthorized =
-      classData.staffId === staffId ||
-      classData.staff.some(s => s.staffId === staffId);
-
-    if (!isAuthorized) {
-      return res.status(403).json({ error: 'Unauthorized' });
-    }
-
-    const student = await Student.findOne({ email: studentEmail });
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
-    }
-
-    await enrollStudentInClass({ classId, student });
-
-    res.json({
-      success: true,
-      message: `Student ${student.email} enrolled successfully`
-    });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Get class by ID
-// Get class by ID
-router.get('/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    
-    console.log('🔍 GET Class by ID:', id);
-    
-    // Check if it's a valid MongoDB ObjectId
-    if (mongoose.Types.ObjectId.isValid(id)) {
-      const classData = await Class.findById(id);
-      if (classData) {
-        console.log('✅ Class found:', classData.name);
-        return res.json({ 
-          success: true,
-          class: classData
-        });
-      }
-    }
-    
-    // If not found by ID, try to find by subjectId
-    console.log('🔄 Trying to find class by subjectId:', id);
-    const classBySubject = await Class.findOne({ subjectId: id });
-    if (classBySubject) {
-      console.log('✅ Class found by subjectId:', classBySubject.name);
-      return res.json({ 
-        success: true,
-        class: classBySubject,
-        foundBy: 'subjectId'
+    // Validate input
+    if (!studentEmail) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Student email is required' 
       });
     }
-    
-    console.log('❌ Class not found with ID or subjectId:', id);
-    return res.status(404).json({ 
-      success: false,
-      error: 'Class not found',
-      message: `No class found with ID: ${id}`
+
+    // Check if the classroom exists
+    const classData = await Class.findById(classId);
+    if (!classData) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Class not found' 
+      });
+    }
+
+    // Verify if the staffId is part of the class
+      const isAuthorized = classData.staffId === staffId || classData.staff.some(s => s.staffId === staffId);
+    if (!isAuthorized) {
+      return res.status(403).json({ 
+        success: false,
+        error: 'Unauthorized: Staff member does not have access to this class' 
+      });
+    }
+
+    // Find the student by email
+    const student = await Student.findOne({ email: studentEmail });
+    if (!student) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Student not found with the provided email' 
+      });
+    }
+
+    // Check if the student is already in the classroom
+    const alreadyJoined = classData.students.some(s => s.studentId === student._id.toString());
+    if (alreadyJoined) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Student is already in the classroom' 
+      });
+    }
+
+    // Add the student to the classroom
+    classData.students.push({
+      studentId: student._id.toString(),
+      name: student.name || studentEmail.split('@')[0] || 'Unknown',
+      email: studentEmail,
+      rollNumber: student.rollNumber || '',
+      batch: student.batch || '',
+      major: student.major || '',
+      joinedAt: new Date()
     });
-    
-  } catch (error) {
-    console.error('❌ Error fetching class:', error.message, error.stack);
+    await classData.save();
+
+    res.status(200).json({ 
+      success: true,
+      message: `Student ${student.email} successfully added to class ${classId}`,
+      data: { studentId: student._id, classroomId: classId }
+    });
+  } catch (err) {
+    console.error('Error adding student to classroom:', err);
     res.status(500).json({ 
       success: false,
-      error: `Failed to fetch class: ${error.message}`
+      error: 'Failed to add student: ' + err.message 
     });
   }
 });
+
 
 // Existing GET route to fetch all students
 router.get('/', async (req, res) => {
@@ -726,16 +698,114 @@ router.get('/', async (req, res) => {
 });
 
 
-router.get('/student/:studentId', async (req, res) => {
-  const { studentId } = req.params;
 
-  const classes = await Class.find({
-    'students.studentId': studentId
-  });
+router.post('/:classId/people/staff/:staffId', async (req, res) => {
+  try {
+    const { classId, staffId } = req.params;
+    const { studentEmail } = req.body;
 
-  res.json({ success: true, classes });
+    // Validate input
+    if (!studentEmail) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Student email is required' 
+      });
+    }
+
+    // Check if the classroom exists
+    const classData = await Class.findById(classId);
+    if (!classData) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Class not found' 
+      });
+    }
+
+    // Verify if the staffId is part of the class
+    const isAuthorized = classData.staffId === staffId || classData.staff.some(s => s.staffId === staffId);
+    if (!isAuthorized) {
+      return res.status(403).json({ 
+        success: false,
+        error: 'Unauthorized: Staff member does not have access to this class' 
+      });
+    }
+
+    // Find the student by email
+    const student = await Student.findOne({ email: studentEmail });
+    if (!student) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Student not found with the provided email' 
+      });
+    }
+
+    // Check if the student is already in the classroom
+    const alreadyJoined = classData.students.some(s => s.studentId === student._id.toString());
+    if (alreadyJoined) {
+      return res.status(400).json({ 
+        success: false,
+        error: 'Student is already in the classroom' 
+      });
+    }
+
+    // Add the student to the classroom
+    classData.students.push({
+      studentId: student._id.toString(),
+      name: student.name || studentEmail.split('@')[0] || 'Unknown',
+      email: studentEmail,
+      rollNumber: student.rollNumber || '',
+      batch: student.batch || '',
+      major: student.major || '',
+      joinedAt: new Date()
+    });
+    await classData.save();
+
+    res.status(200).json({ 
+      success: true,
+      message: `Student ${student.email} successfully added to class ${classId}`,
+      data: { studentId: student._id, classroomId: classId }
+    });
+  } catch (err) {
+    console.error('Error adding student to classroom:', err);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to add student: ' + err.message 
+    });
+  }
 });
 
+router.get('/student/:studentId', async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { email } = req.query;
+    console.log('GET /student/:studentId - studentId:', studentId, 'email:', email);
+
+    if (!email || email === 'undefined') {
+      console.error('Invalid email provided:', email);
+      return res.status(400).json({ 
+        success: false,
+        error: 'Valid email query parameter is required' 
+      });
+    }
+
+    // Find classes where the student's email is in the students array
+    const studentClasses = await Class.find({
+      'students.email': email
+    }).sort({ createdAt: -1 });
+
+    console.log('Found classes:', studentClasses);
+    res.json({ 
+      success: true,
+      classes: studentClasses 
+    });
+  } catch (error) {
+    console.error('Error fetching student classes:', error.message, error.stack);
+    res.status(500).json({ 
+      success: false,
+      error: `Failed to fetch student classes: ${error.message}`
+    });
+  }
+});
 
 
 // Bulk add students to a class

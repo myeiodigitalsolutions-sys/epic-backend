@@ -1,13 +1,6 @@
 const mongoose = require('mongoose');
 
 const studentSchema = new mongoose.Schema({
-  regNo: {
-    type: String,
-    required: [true, 'Registration number is required'],
-    unique: true,
-    trim: true,
-    uppercase: true
-  },
   studentId: {
     type: String,
     required: [true, 'Student ID is required'],
@@ -40,12 +33,6 @@ const studentSchema = new mongoose.Schema({
     default: '',
     trim: true
   },
-  status: {  // ADDED: Status field
-    type: String,
-    enum: ['Active', 'Hold'],
-    default: 'Active',
-    required: [true, 'Status is required']
-  },
   enrollmentDate: {
     type: Date,
     default: Date.now
@@ -68,7 +55,5 @@ studentSchema.pre('save', function(next) {
 
 // Create index for email for faster lookups
 studentSchema.index({ email: 1 });
-studentSchema.index({ regNo: 1 });
-studentSchema.index({ status: 1 }); // ADDED: Index for status
 
 module.exports = mongoose.model('Student', studentSchema);

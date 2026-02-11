@@ -81,9 +81,6 @@ const staffRoutes = require('./routes/staffRoutes');
 const studentRoutes = require('./routes/studentRoutes');
 const messageRoutes = require('./routes/messages');
 const studLogin = require('./routes/activityRoutes');
-const programRoutes = require('./routes/programRoutes');
-const semesterRoutes = require('./routes/semesterRoutes');
-const meetingRoutes = require('./routes/meetingRoutes');
 
 app.use('/api/classes', classRoutes);
 app.use('/api/announcements', announcementRoutes);
@@ -96,9 +93,6 @@ app.use('/api/messages', messageRoutes);
 app.use('/api/activity', studLogin);
 app.use('/api/export', require('./routes/exportRoutes'));
 app.use('/api/logs', require('./routes/logRoutes'));
-app.use('/api/programs', programRoutes);
-app.use('/api/semesters', semesterRoutes);
-app.use('/api/meetings', meetingRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'OK', time: new Date().toISOString() });

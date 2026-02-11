@@ -18,27 +18,19 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Add student with STATUS support
+// Add student
 router.post('/student', async (req, res) => {
   let firebaseUser = null;
   
   try {
-    // ADDED: Include regNo and status in destructuring
-    const { name, program, email, password, regNo, status } = req.body;
+    const { name, program, email, password } = req.body;
     
-    console.log('Adding student with data:', { name, program, email, password: '***', regNo, status });
+    console.log('Adding student with data:', { name, program, email, password: '***' });
     
-    // Validate required fields - ADDED regNo and status
-    if (!name || !program || !email || !password || !regNo || !status) {
+    // Validate required fields
+    if (!name || !program || !email || !password) {
       return res.status(400).json({ 
-        error: 'Name, registration number, program, email, password, and status are required' 
-      });
-    }
-
-    // Validate status value
-    if (status !== 'Active' && status !== 'Hold') {
-      return res.status(400).json({ 
-        error: 'Status must be either Active or Hold' 
+        error: 'Name, program, email, and password are required' 
       });
     }
 
@@ -50,14 +42,6 @@ router.post('/student', async (req, res) => {
       });
     }
 
-    // Validate registration number format (alphanumeric)
-    const regNoRegex = /^[A-Za-z0-9]+$/;
-    if (!regNoRegex.test(regNo)) {
-      return res.status(400).json({ 
-        error: 'Registration number must be alphanumeric' 
-      });
-    }
-
     // Validate password length
     if (password.length < 6) {
       return res.status(400).json({ 
@@ -66,21 +50,12 @@ router.post('/student', async (req, res) => {
     }
 
     const lowerEmail = email.toLowerCase().trim();
-    const upperRegNo = regNo.toUpperCase().trim();
 
-    // Check if student already exists in MongoDB by email
-    const existingStudentByEmail = await Student.findOne({ email: lowerEmail });
-    if (existingStudentByEmail) {
+    // Check if student already exists in MongoDB
+    const existingStudent = await Student.findOne({ email: lowerEmail });
+    if (existingStudent) {
       return res.status(400).json({ 
         error: 'Student email already exists in database' 
-      });
-    }
-
-    // Check if registration number already exists
-    const existingStudentByRegNo = await Student.findOne({ regNo: upperRegNo });
-    if (existingStudentByRegNo) {
-      return res.status(400).json({ 
-        error: 'Registration number already exists in database' 
       });
     }
 
@@ -128,15 +103,13 @@ router.post('/student', async (req, res) => {
       throw createErr;
     }
 
-    // Create student in MongoDB with Firebase UID, Registration Number, and Status
+    // Create student in MongoDB with Firebase UID
     const student = new Student({ 
-      regNo: upperRegNo,
-      studentId: firebaseUser.uid,
+      studentId: firebaseUser.uid, // Store Firebase UID
       name: name.trim(),
       program: program.trim(),
       email: lowerEmail,
-      password: password,
-      status: status  // ADDED: Store status
+      password: password // Store password for export
     });
     
     await student.save();
@@ -146,12 +119,10 @@ router.post('/student', async (req, res) => {
       message: 'Student added successfully',
       data: {
         id: student._id,
-        regNo: student.regNo,
         studentId: student.studentId,
         name: student.name,
         program: student.program,
         email: student.email,
-        status: student.status,  // ADDED: Return status
         createdAt: student.createdAt,
         firebaseUid: firebaseUser.uid
       }
@@ -171,18 +142,8 @@ router.post('/student', async (req, res) => {
     
     // Handle duplicate key error for MongoDB
     if (err.code === 11000) {
-      if (err.keyPattern && err.keyPattern.email) {
-        return res.status(400).json({ 
-          error: 'Student email already exists in database' 
-        });
-      }
-      if (err.keyPattern && err.keyPattern.regNo) {
-        return res.status(400).json({ 
-          error: 'Registration number already exists in database' 
-        });
-      }
       return res.status(400).json({ 
-        error: 'Duplicate entry found' 
+        error: 'Student email already exists in database' 
       });
     }
     
@@ -200,390 +161,288 @@ router.post('/student', async (req, res) => {
   }
 });
 
-// ADDED: New endpoint to check student status during login
-router.post('/check-status', async (req, res) => {
+// Get student by ID
+router.get('/:id', async (req, res) => {
   try {
-    const { email } = req.body;
-    
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required' });
-    }
-
-    const student = await Student.findOne({ email: email.toLowerCase().trim() });
-    
+    // Try to find by studentId first (Firebase UID), then by MongoDB _id
+    let student = await Student.findOne({ studentId: req.params.id });
     if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
-    }
-
-    res.status(200).json({ 
-      status: student.status,
-      name: student.name,
-      regNo: student.regNo
-    });
-  } catch (err) {
-    console.error('Error checking student status:', err);
-    res.status(500).json({ error: 'Failed to check status: ' + err.message });
-  }
-});
-
-// Bulk student creation with STATUS support
-router.post('/bulk-users', async (req, res) => {
-  try {
-    const type = req.query.type; 
-    const users = req.body.users;
-
-    if (!type || type !== 'student') {
-      return res.status(400).json({ 
-        error: 'Invalid or missing type (must be student).' 
-      });
-    }
-    
-    if (!Array.isArray(users) || users.length === 0) {
-      return res.status(400).json({ 
-        error: 'No users provided' 
-      });
-    }
-
-    const results = [];
-    const createdFirebaseUsers = [];
-    
-    for (const user of users) {
-      // ADDED: Include regNo and status in destructuring
-      const { name, email, password, program, regNo, status } = user;
-      
-      // Validate required fields - ADDED regNo and status
-      if (!name || !program || !email || !password || !regNo || !status) {
-        results.push({ 
-          email: email || 'unknown', 
-          regNo: regNo || 'unknown',
-          success: false, 
-          error: 'Missing required fields (name, regNo, program, email, password, status)' 
-        });
-        continue;
-      }
-
-      // Validate status value
-      if (status !== 'Active' && status !== 'Hold') {
-        results.push({ 
-          email, 
-          regNo,
-          success: false, 
-          error: 'Status must be either Active or Hold' 
-        });
-        continue;
-      }
-
-      // Validate email format
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-      if (!emailRegex.test(email)) {
-        results.push({ 
-          email, 
-          regNo,
-          success: false, 
-          error: 'Invalid email format' 
-        });
-        continue;
-      }
-
-      // Validate registration number format
-      const regNoRegex = /^[A-Za-z0-9]+$/;
-      if (!regNoRegex.test(regNo)) {
-        results.push({ 
-          email, 
-          regNo,
-          success: false, 
-          error: 'Registration number must be alphanumeric' 
-        });
-        continue;
-      }
-
-      // Validate password length
-      if (password.length < 6) {
-        results.push({ 
-          email, 
-          regNo,
-          success: false, 
-          error: 'Password must be at least 6 characters' 
-        });
-        continue;
-      }
-
-      const lowerEmail = email.toLowerCase().trim();
-      const upperRegNo = regNo.toUpperCase().trim();
-
       try {
-        // Check if exists in Firebase
-        try {
-          await admin.auth().getUserByEmail(lowerEmail);
-          results.push({ 
-            email: lowerEmail, 
-            regNo: upperRegNo,
-            success: false, 
-            error: 'Email already exists in Firebase' 
-          });
-          continue;
-        } catch (err) {
-          if (err.code !== 'auth/user-not-found') {
-            results.push({ 
-              email: lowerEmail, 
-              regNo: upperRegNo,
-              success: false, 
-              error: 'Firebase error: ' + err.message 
-            });
-            continue;
-          }
-        }
-
-        // Check if exists in MongoDB by email
-        const existingStudentByEmail = await Student.findOne({ email: lowerEmail });
-        if (existingStudentByEmail) {
-          results.push({ 
-            email: lowerEmail, 
-            regNo: upperRegNo,
-            success: false, 
-            error: 'Email already exists in database' 
-          });
-          continue;
-        }
-
-        // Check if registration number already exists
-        const existingStudentByRegNo = await Student.findOne({ regNo: upperRegNo });
-        if (existingStudentByRegNo) {
-          results.push({ 
-            email: lowerEmail, 
-            regNo: upperRegNo,
-            success: false, 
-            error: 'Registration number already exists in database' 
-          });
-          continue;
-        }
-
-        // Create in Firebase
-        let firebaseUser;
-        try {
-          firebaseUser = await admin.auth().createUser({ 
-            email: lowerEmail, 
-            password: password,
-            displayName: name.trim(),
-            emailVerified: false,
-            disabled: false
-          });
-          createdFirebaseUsers.push({ uid: firebaseUser.uid, email: lowerEmail });
-          console.log('Firebase user created:', firebaseUser.uid);
-        } catch (createErr) {
-          results.push({ 
-            email: lowerEmail, 
-            regNo: upperRegNo,
-            success: false, 
-            error: 'Firebase creation failed: ' + createErr.message 
-          });
-          continue;
-        }
-
-        // Create in MongoDB with Firebase UID, RegNo, and Status
-        const student = new Student({
-          regNo: upperRegNo,
-          studentId: firebaseUser.uid,
-          name: name.trim(),
-          program: program.trim(),
-          email: lowerEmail,
-          password: password,
-          status: status  // ADDED: Store status
-        });
-        
-        await student.save();
-
-        results.push({ 
-          email: lowerEmail, 
-          regNo: upperRegNo,
-          success: true,
-          studentId: student._id,
-          firebaseUid: firebaseUser.uid,
-          status: status  // ADDED: Return status
-        });
-      } catch (err) {
-        console.error(`Error processing ${email}:`, err);
-        results.push({ 
-          email: lowerEmail, 
-          regNo: upperRegNo,
-          success: false, 
-          error: err.message 
-        });
+        student = await Student.findById(req.params.id);
+      } catch (mongoErr) {
+        // If not a valid MongoDB ID, continue to error
       }
     }
-
-    // If any errors occurred, clean up Firebase users that were created
-    const failedResults = results.filter(r => !r.success);
-    if (failedResults.length > 0 && createdFirebaseUsers.length > 0) {
-      console.log('Cleaning up Firebase users due to errors...');
-      for (const fbUser of createdFirebaseUsers) {
-        try {
-          await admin.auth().deleteUser(fbUser.uid);
-          console.log('Cleaned up Firebase user:', fbUser.uid);
-        } catch (cleanupErr) {
-          console.error('Failed to cleanup Firebase user:', cleanupErr);
-        }
-      }
+    
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        error: 'Student not found'
+      });
     }
-
-    res.status(200).json({ 
-      message: `Bulk ${type} upload completed`,
-      results,
-      summary: {
-        total: results.length,
-        success: results.filter(r => r.success).length,
-        failed: results.filter(r => !r.success).length
-      }
+    
+    res.json({
+      success: true,
+      student
     });
-  } catch (err) {
-    console.error('Bulk upload error:', err);
-    res.status(500).json({ 
-      error: 'Bulk upload failed: ' + err.message 
+  } catch (error) {
+    console.error('Error getting student:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Server error: ' + error.message
     });
   }
 });
 
-// DELETE student by ID
-router.delete('/student/:id', async (req, res) => {
+// Get student by email
+router.get('/email/:email', async (req, res) => {
   try {
-    const studentId = req.params.id;
-    
-    if (!mongoose.Types.ObjectId.isValid(studentId)) {
-      return res.status(400).json({ error: 'Invalid student ID format' });
+    const student = await Student.findOne({ email: req.params.email.toLowerCase() });
+    if (!student) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Student not found with this email' 
+      });
     }
+    
+    res.json({
+      success: true,
+      student
+    });
+  } catch (error) {
+    console.error('Error finding student by email:', error);
+    res.status(500).json({ 
+      success: false,
+      error: 'Failed to find student: ' + error.message
+    });
+  }
+});
 
-    const student = await Student.findById(studentId);
+// Update student
+router.put('/:id', async (req, res) => {
+  try {
+    const { name, email, program, phone } = req.body;
+    
+    // Try to find by studentId first (Firebase UID), then by MongoDB _id
+    let student = await Student.findOne({ studentId: req.params.id });
+    if (!student) {
+      try {
+        student = await Student.findById(req.params.id);
+      } catch (mongoErr) {
+        // If not a valid MongoDB ID, continue to error
+      }
+    }
     
     if (!student) {
-      return res.status(404).json({ error: 'Student not found' });
+      return res.status(404).json({ 
+        success: false,
+        error: 'Student not found' 
+      });
     }
 
-    // Delete from Firebase Authentication
-    try {
-      await admin.auth().deleteUser(student.studentId);
-      console.log('Deleted from Firebase:', student.studentId);
-    } catch (firebaseErr) {
-      console.error('Firebase deletion error:', firebaseErr);
-      if (firebaseErr.code !== 'auth/user-not-found') {
-        return res.status(400).json({ 
-          error: 'Firebase deletion failed: ' + firebaseErr.message 
+    // Update fields if provided
+    const updateData = {};
+    if (name) updateData.name = name;
+    if (email) updateData.email = email.toLowerCase();
+    if (program) updateData.program = program;
+    if (phone) updateData.phone = phone;
+
+    // Update Firebase if email is being changed
+    if (email && student.email !== email.toLowerCase()) {
+      try {
+        const firebaseUser = await admin.auth().getUserByEmail(student.email);
+        await admin.auth().updateUser(firebaseUser.uid, {
+          email: email.toLowerCase(),
+          displayName: name || student.name
         });
+      } catch (firebaseErr) {
+        console.error('Error updating Firebase user:', firebaseErr);
+      }
+    }
+
+    // Update MongoDB
+    const updatedStudent = await Student.findByIdAndUpdate(
+      student._id,
+      { $set: updateData },
+      { new: true, runValidators: true }
+    );
+
+    res.json({ 
+      success: true,
+      student: updatedStudent,
+      message: 'Student updated successfully'
+    });
+  } catch (error) {
+    console.error('Error updating student:', error);
+    res.status(500).json({ 
+      success: false,
+      error: `Failed to update student: ${error.message}`
+    });
+  }
+});
+
+// Delete student
+router.delete('/:id', async (req, res) => {
+  try {
+    // Try to find by studentId first (Firebase UID), then by MongoDB _id
+    let student = await Student.findOne({ studentId: req.params.id });
+    if (!student) {
+      try {
+        student = await Student.findById(req.params.id);
+      } catch (mongoErr) {
+        // If not a valid MongoDB ID, continue to error
+      }
+    }
+    
+    if (!student) {
+      return res.status(404).json({ 
+        success: false,
+        error: 'Student not found' 
+      });
+    }
+
+    // Delete from Firebase using the studentId (Firebase UID)
+    try {
+      if (student.studentId) {
+        await admin.auth().deleteUser(student.studentId);
+        console.log('User deleted from Firebase:', student.studentId);
+      } else {
+        // Fallback: try to find by email
+        try {
+          const firebaseUser = await admin.auth().getUserByEmail(student.email);
+          await admin.auth().deleteUser(firebaseUser.uid);
+          console.log('User deleted from Firebase (by email):', firebaseUser.uid);
+        } catch (emailErr) {
+          console.error('Could not delete from Firebase by email:', emailErr);
+        }
+      }
+    } catch (firebaseErr) {
+      console.error('Error deleting from Firebase:', firebaseErr);
+      // Continue with MongoDB delete even if Firebase delete fails
+    }
+
+    // Delete from MongoDB
+    await Student.findByIdAndDelete(student._id);
+
+    res.json({ 
+      success: true,
+      message: 'Student deleted successfully'
+    });
+  } catch (error) {
+    console.error('Error deleting student:', error);
+    res.status(500).json({ 
+      success: false,
+      error: `Failed to delete student: ${error.message}`
+    });
+  }
+});
+
+// Delete user (student) - Keep existing
+router.delete('/users', async (req, res) => {
+  try {
+    const { email, type } = req.body;
+    console.log('Delete request received:', { email, type });
+
+    if (!email || !type) {
+      return res.status(400).json({ 
+        error: 'Email and type (staff/student) are required' 
+      });
+    }
+
+    if (type !== 'student') {
+      return res.status(400).json({ 
+        error: 'Type must be "student" for this endpoint' 
+      });
+    }
+
+    const lowerEmail = email.toLowerCase().trim();
+
+    // Get Firebase user by email
+    let firebaseUser;
+    try {
+      firebaseUser = await admin.auth().getUserByEmail(lowerEmail);
+      console.log('Firebase user found:', firebaseUser.uid);
+    } catch (firebaseErr) {
+      if (firebaseErr.code === 'auth/user-not-found') {
+        console.log('User not found in Firebase, continuing with MongoDB delete');
+      } else {
+        throw firebaseErr;
+      }
+    }
+
+    // Delete from Firebase if user exists
+    if (firebaseUser) {
+      try {
+        await admin.auth().deleteUser(firebaseUser.uid);
+        console.log('User deleted from Firebase:', firebaseUser.uid);
+      } catch (firebaseErr) {
+        console.error('Error deleting from Firebase:', firebaseErr);
+        // Continue with MongoDB delete
       }
     }
 
     // Delete from MongoDB
-    await Student.findByIdAndDelete(studentId);
-    console.log('Deleted from MongoDB:', studentId);
-
-    res.status(200).json({ message: 'Student deleted successfully' });
-  } catch (err) {
-    console.error('Error deleting student:', err);
-    res.status(500).json({ error: 'Failed to delete student: ' + err.message });
-  }
-});
-
-// DELETE multiple students
-router.post('/delete-bulk', async (req, res) => {
-  try {
-    const { studentIds } = req.body;
+    console.log('Attempting to delete student from MongoDB:', lowerEmail);
+    const result = await Student.deleteOne({ email: lowerEmail });
+    console.log('Student deletion result:', result);
     
-    if (!Array.isArray(studentIds) || studentIds.length === 0) {
-      return res.status(400).json({ error: 'No student IDs provided' });
+    if (result.deletedCount === 0) {
+      return res.status(404).json({ 
+        error: 'Student not found in database' 
+      });
     }
 
-    const results = {
-      deleted: [],
-      failed: []
-    };
-
-    for (const studentId of studentIds) {
-      try {
-        if (!mongoose.Types.ObjectId.isValid(studentId)) {
-          results.failed.push({ 
-            id: studentId, 
-            error: 'Invalid ID format' 
-          });
-          continue;
-        }
-
-        const student = await Student.findById(studentId);
-        
-        if (!student) {
-          results.failed.push({ 
-            id: studentId, 
-            error: 'Student not found' 
-          });
-          continue;
-        }
-
-        // Delete from Firebase
-        try {
-          await admin.auth().deleteUser(student.studentId);
-        } catch (firebaseErr) {
-          if (firebaseErr.code !== 'auth/user-not-found') {
-            console.error('Firebase deletion error:', firebaseErr);
-          }
-        }
-
-        // Delete from MongoDB
-        await Student.findByIdAndDelete(studentId);
-        
-        results.deleted.push({ 
-          id: studentId, 
-          email: student.email 
-        });
-      } catch (err) {
-        console.error(`Error deleting student ${studentId}:`, err);
-        results.failed.push({ 
-          id: studentId, 
-          error: err.message 
-        });
-      }
-    }
-
-    res.status(200).json({
-      message: 'Bulk delete completed',
-      summary: {
-        total: studentIds.length,
-        deleted: results.deleted.length,
-        failed: results.failed.length
-      },
-      results
+    res.status(200).json({ 
+      message: `User ${email} deleted successfully` 
     });
   } catch (err) {
-    console.error('Bulk delete error:', err);
-    res.status(500).json({ error: 'Bulk delete failed: ' + err.message });
+    console.error('Error occurred:', err);
+    res.status(500).json({ 
+      error: 'Failed to delete user: ' + err.message 
+    });
   }
 });
 
-// UPDATE user (student) - with STATUS support
-router.put('/update-user', async (req, res) => {
+// Update user (student) - Keep existing
+// Update user (student) - Keep existing
+router.put('/users', async (req, res) => {
   try {
-    const { oldEmail, newEmail, name, program, regNo, status, newPassword } = req.body;
-    
-    if (!oldEmail) {
-      return res.status(400).json({ error: 'Old email is required' });
+    const { oldEmail, newEmail, type, newPassword, name, program } = req.body;
+    console.log('Update request received:', { oldEmail, newEmail, type, name, program, newPassword: newPassword ? '***' : 'not provided' });
+
+    if (!oldEmail || !type) {
+      return res.status(400).json({ 
+        error: 'oldEmail and type (staff/student) are required' 
+      });
+    }
+
+    if (!newEmail && !newPassword && !name && !program) {
+      return res.status(400).json({ 
+        error: 'At least one field to update must be provided' 
+      });
+    }
+
+    if (type !== 'student') {
+      return res.status(400).json({ 
+        error: 'Type must be "student" for this endpoint' 
+      });
     }
 
     const lowerOldEmail = oldEmail.toLowerCase().trim();
 
-    // Find student
-    const student = await Student.findOne({ email: lowerOldEmail });
-    if (!student) {
-      return res.status(404).json({ error: 'Student not found in database' });
+    // Validate new email format if provided
+    if (newEmail) {
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(newEmail)) {
+        return res.status(400).json({ 
+          error: 'Invalid new email format' 
+        });
+      }
     }
 
-    // Validate new password if provided
     if (newPassword && newPassword.length < 6) {
       return res.status(400).json({ 
         error: 'New password must be at least 6 characters' 
-      });
-    }
-
-    // Validate status if provided
-    if (status && status !== 'Active' && status !== 'Hold') {
-      return res.status(400).json({ 
-        error: 'Status must be either Active or Hold' 
       });
     }
 
@@ -624,20 +483,20 @@ router.put('/update-user', async (req, res) => {
       console.log('User updated in Firebase:', user.uid);
     }
 
-    // Update MongoDB - ADDED: status update
+    // Update MongoDB - FIXED: Include password update
     const mongoUpdateData = {};
     if (newEmail) mongoUpdateData.email = newEmail.toLowerCase().trim();
     if (name) mongoUpdateData.name = name.trim();
     if (program) mongoUpdateData.program = program.trim();
-    if (regNo) mongoUpdateData.regNo = regNo.toUpperCase().trim();
-    if (status) mongoUpdateData.status = status;  // ADDED: Update status
     
+    // CRITICAL FIX: Update password in MongoDB when it's changed
     if (newPassword) {
-      mongoUpdateData.password = newPassword;
+      mongoUpdateData.password = newPassword; // Store the new password in MongoDB
       mongoUpdateData.passwordUpdated = true;
       mongoUpdateData.lastPasswordUpdate = new Date();
     }
     
+    // Always update the updatedAt timestamp
     mongoUpdateData.updatedAt = new Date();
     
     if (Object.keys(mongoUpdateData).length > 0) {
@@ -649,7 +508,7 @@ router.put('/update-user', async (req, res) => {
     }
 
     res.status(200).json({ 
-      success: true,
+      success: true, // Added success flag for frontend
       message: `User ${newEmail || oldEmail} updated successfully`,
       updatedFields: Object.keys(mongoUpdateData)
     });
@@ -664,6 +523,174 @@ router.put('/update-user', async (req, res) => {
     res.status(500).json({ 
       success: false,
       error: 'Failed to update user: ' + err.message 
+    });
+  }
+});
+
+// Bulk student creation
+router.post('/bulk-users', async (req, res) => {
+  try {
+    const type = req.query.type; 
+    const users = req.body.users;
+
+    if (!type || type !== 'student') {
+      return res.status(400).json({ 
+        error: 'Invalid or missing type (must be student).' 
+      });
+    }
+    
+    if (!Array.isArray(users) || users.length === 0) {
+      return res.status(400).json({ 
+        error: 'No users provided' 
+      });
+    }
+
+    const results = [];
+    const createdFirebaseUsers = []; // Track created users for cleanup
+    
+    for (const user of users) {
+      const { name, email, password, program } = user;
+      
+      // Validate required fields
+      if (!name || !program || !email || !password) {
+        results.push({ 
+          email: email || 'unknown', 
+          success: false, 
+          error: 'Missing required fields (name, program, email, password)' 
+        });
+        continue;
+      }
+
+      // Validate email format
+      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!emailRegex.test(email)) {
+        results.push({ 
+          email, 
+          success: false, 
+          error: 'Invalid email format' 
+        });
+        continue;
+      }
+
+      // Validate password length
+      if (password.length < 6) {
+        results.push({ 
+          email, 
+          success: false, 
+          error: 'Password must be at least 6 characters' 
+        });
+        continue;
+      }
+
+      const lowerEmail = email.toLowerCase().trim();
+
+      try {
+        // Check if exists in Firebase
+        try {
+          await admin.auth().getUserByEmail(lowerEmail);
+          results.push({ 
+            email: lowerEmail, 
+            success: false, 
+            error: 'Email already exists in Firebase' 
+          });
+          continue;
+        } catch (err) {
+          if (err.code !== 'auth/user-not-found') {
+            results.push({ 
+              email: lowerEmail, 
+              success: false, 
+              error: 'Firebase error: ' + err.message 
+            });
+            continue;
+          }
+        }
+
+        // Check if exists in MongoDB
+        const existingStudent = await Student.findOne({ email: lowerEmail });
+        if (existingStudent) {
+          results.push({ 
+            email: lowerEmail, 
+            success: false, 
+            error: 'Email already exists in database' 
+          });
+          continue;
+        }
+
+        // Create in Firebase
+        let firebaseUser;
+        try {
+          firebaseUser = await admin.auth().createUser({ 
+            email: lowerEmail, 
+            password: password,
+            displayName: name.trim(),
+            emailVerified: false,
+            disabled: false
+          });
+          createdFirebaseUsers.push({ uid: firebaseUser.uid, email: lowerEmail });
+          console.log('Firebase user created:', firebaseUser.uid);
+        } catch (createErr) {
+          results.push({ 
+            email: lowerEmail, 
+            success: false, 
+            error: 'Firebase creation failed: ' + createErr.message 
+          });
+          continue;
+        }
+
+        // Create in MongoDB with Firebase UID
+        const student = new Student({
+          studentId: firebaseUser.uid, // Store Firebase UID
+          name: name.trim(),
+          program: program.trim(),
+          email: lowerEmail,
+          password: password
+        });
+        
+        await student.save();
+
+        results.push({ 
+          email: lowerEmail, 
+          success: true,
+          studentId: student._id,
+          firebaseUid: firebaseUser.uid
+        });
+      } catch (err) {
+        console.error(`Error processing ${email}:`, err);
+        results.push({ 
+          email: lowerEmail, 
+          success: false, 
+          error: err.message 
+        });
+      }
+    }
+
+    // If any errors occurred, clean up Firebase users that were created
+    const failedResults = results.filter(r => !r.success);
+    if (failedResults.length > 0 && createdFirebaseUsers.length > 0) {
+      console.log('Cleaning up Firebase users due to errors...');
+      for (const fbUser of createdFirebaseUsers) {
+        try {
+          await admin.auth().deleteUser(fbUser.uid);
+          console.log('Cleaned up Firebase user:', fbUser.uid);
+        } catch (cleanupErr) {
+          console.error('Failed to cleanup Firebase user:', cleanupErr);
+        }
+      }
+    }
+
+    res.status(200).json({ 
+      message: `Bulk ${type} upload completed`,
+      results,
+      summary: {
+        total: results.length,
+        success: results.filter(r => r.success).length,
+        failed: results.filter(r => !r.success).length
+      }
+    });
+  } catch (err) {
+    console.error('Bulk upload error:', err);
+    res.status(500).json({ 
+      error: 'Bulk upload failed: ' + err.message 
     });
   }
 });
